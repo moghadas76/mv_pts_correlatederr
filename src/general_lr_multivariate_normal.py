@@ -9,30 +9,44 @@ from torch.distributions.utils import _standard_normal, lazy_property
 __all__ = ['GeneralLowRankMultivariateNormal']
 
 
-def _batch_capacitance_tril(W, D, C, E):
+def _batch_capacitance_tril(W, D, C, E_inv):
     r"""
-    W: A, (1, DB, DR) 
-    D: cov_diag, (1, DB) 
-    C: C_r (D, D)
-    E: I_R (R, R)
-    `inv(C) + W.T @ inv(D) @ W`
-    Computes Cholesky of :math:`I + W.T @ inv(D) @ W` for a batch of matrices :math:`W`
-    and a batch of vectors :math:`D`.
+    Computes Cholesky of the capacitance matrix:
+        (C ⊗ G)^{-1} + W^T D^{-1} W  =  (C^{-1} ⊗ G^{-1}) + W^T D^{-1} W
+
+    W: A, (1, DB, DR)
+    D: cov_diag, (1, DB)
+    C: temporal correlation C_t (D, D)
+    E_inv: inverse of factor covariance G_t^{-1} (R, R).
+           When G_t = I_R, E_inv = I_R (backward compatible).
     """
     Wt_Dinv = W.mT / D.unsqueeze(-2)
-    K = torch.kron(torch.linalg.inv(C).contiguous(), E) + torch.matmul(Wt_Dinv, W).contiguous()
+    K = torch.kron(torch.linalg.inv(C).contiguous(), E_inv) + torch.matmul(Wt_Dinv, W).contiguous()
     return torch.linalg.cholesky(K)
 
 
-def _batch_lowrank_logdet(W, D, capacitance_tril, C_tril):
+def _batch_lowrank_logdet(W, D, capacitance_tril, C_tril, E_tril=None):
     r"""
-    Uses "matrix determinant lemma"::
-        log|W @ W.T + D| = log|C| + log|D|,
-    where :math:`C` is the capacitance matrix :math:`I + W.T @ inv(D) @ W`, to compute
-    the log determinant.
+    Uses the matrix determinant lemma for
+    :math:`\Sigma = A\,(C_t \otimes G_t)\,A^\top + \mathrm{diag}(d)`::
+
+        log|Σ| = log|cap| + log|D| + R·log|C_t| + D_horizon·log|G_t|
+
+    where cap is the capacitance matrix
+    :math:`(C_t \otimes G_t)^{-1} + A^\top D^{-1} A`.
+    When :math:`G_t = I_R` (E_tril is None), the :math:`\log|G_t|` term vanishes.
     """
     R = W.shape[-1] // C_tril.shape[-1]
-    return 2*capacitance_tril.diagonal(dim1=-2, dim2=-1).log().sum(-1) + D.log().sum(-1) + 2*R*C_tril.unsqueeze(0).diagonal(dim1=-2, dim2=-1).log().sum(-1)
+    D_horizon = C_tril.shape[-1]
+    result = (
+        2 * capacitance_tril.diagonal(dim1=-2, dim2=-1).log().sum(-1)
+        + D.log().sum(-1)
+        + 2 * R * C_tril.unsqueeze(0).diagonal(dim1=-2, dim2=-1).log().sum(-1)
+    )
+    if E_tril is not None:
+        # log|C⊗G| = R·log|C| + D_horizon·log|G|; add the G contribution
+        result = result + 2 * D_horizon * E_tril.unsqueeze(0).diagonal(dim1=-2, dim2=-1).log().sum(-1)
+    return result
 
 
 def _batch_lowrank_mahalanobis(W, D, x, capacitance_tril):
@@ -119,7 +133,11 @@ class GeneralLowRankMultivariateNormal(Distribution):
         self._unbroadcasted_corr_mat = corr_mat
         self._unbroadcasted_corr_eye = corr_eye
         self.reg_w = reg_w
-        self._capacitance_tril = _batch_capacitance_tril(cov_factor, cov_diag, corr_mat, corr_eye)
+        # Compute G_t^{-1} for capacitance and Cholesky(G_t) for log-det.
+        # When corr_eye = I_R: inv(I_R)=I_R, chol(I_R)=I_R, log|I_R|=0 → backward compatible.
+        self._unbroadcasted_corr_eye_inv = torch.linalg.inv(corr_eye).contiguous()
+        self._unbroadcasted_corr_eye_tril = torch.linalg.cholesky(corr_eye)
+        self._capacitance_tril = _batch_capacitance_tril(cov_factor, cov_diag, corr_mat, self._unbroadcasted_corr_eye_inv)
         self._unbroadcasted_corr_mat_tril = torch.linalg.cholesky(corr_mat)
         super(GeneralLowRankMultivariateNormal, self).__init__(batch_shape, event_shape,
                                                         validate_args=validate_args)
@@ -207,7 +225,8 @@ class GeneralLowRankMultivariateNormal(Distribution):
         log_det = _batch_lowrank_logdet(self._unbroadcasted_cov_factor,
                                         self._unbroadcasted_cov_diag,
                                         self._capacitance_tril, 
-                                        self._unbroadcasted_corr_mat_tril)
+                                        self._unbroadcasted_corr_mat_tril,
+                                        self._unbroadcasted_corr_eye_tril)
         if self.reg_w != 0:
             return -0.5 * (self._event_shape[0] * math.log(2 * math.pi) + log_det + M) + self.reg_w*2*self._unbroadcasted_corr_mat_tril.unsqueeze(0).diagonal(dim1=-2, dim2=-1).log().sum(-1)
         else:

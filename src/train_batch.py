@@ -22,8 +22,8 @@ from pytorch_forecasting.data.encoders import (
 
 from metrics import get_metrics
 from batched_model import BatchDeepAREstimator, BatchDeepARPredictor, BatchGPTEstimator, BatchGPTPredictor
-from loss import BatchMGD_AR, BatchMGD_Kernel
-
+from loss import BatchMGD_AR, BatchMGD_Kernel, BatchMGDGraph_Kernel
+from dynamic_graph import load_static_graph
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--device', type=int, default=0)
@@ -79,8 +79,14 @@ def main():
     ##################################### Load Data ###################################
     data = pd.read_csv("./datasets/%s.csv"%(args.dataset))
     if dataset_freq_dict[args.dataset] in ['30min', '5min', 'H', 'T']:
-        data['datetime'] = pd.to_datetime(data['datetime'])
-        data['tod'] = (data['datetime'].values - data['datetime'].values.astype("datetime64[D]")) / np.timedelta64(1, "D")
+        # data['datetime'] = pd.to_datetime(data['datetime'])
+        # if args.dataset =='pems03_flow':
+        #     data["datetime"] = pd.date_range(start='2012-01-01', periods=len(data['datetime']), freq='5min')
+        # sanity check of dates
+        # np.timedelta64(1, "D")
+        data["datetime"] = pd.to_datetime(data["datetime"])
+        data["tod"] =(data["datetime"].values - data["datetime"].values.astype("datetime64[D]")) / np.timedelta64(1, "D")
+        
         data['dow'] = data['datetime'].dt.weekday
         time_varying_known_cats = ['tod', 'dow']
         data = data.astype(dict(sensor=str, tod=str, dow=str))
@@ -141,7 +147,25 @@ def main():
     if args.loss == 'kernel':
         log_file = "%s_batch_%s_B%s_Q%s_H%s_D%s_Kr%s_DeltaL%s_LossLRw%s_RegW%s_TrainL_%s"%(args.dataset, args.loss, args.batch_size, args.prediction_horizon, args.hidden_size, args.batch_cov_horizon, args.num_mixture_r, args.delta_l, args.loss_lr_w, args.reg_w, args.train_l)
         logger = TensorBoardLogger(save_dir="logs", name=args.model, version=log_file)
-        loss = BatchMGD_Kernel(D=args.batch_cov_horizon, K_r=args.num_mixture_r, delta_l=args.delta_l, train_l=args.train_l, lr=args.loss_lr, wd=args.loss_wd, reg_w=args.reg_w)
+        # loss = BatchMGD_Kernel(
+            # D=args.batch_cov_horizon, 
+            # K_r=args.num_mixture_r, 
+            # delta_l=args.delta_l, 
+            # train_l=args.train_l, 
+            # lr=args.loss_lr, 
+            # wd=args.loss_wd, reg_w=args.reg_w)
+        loss = BatchMGDGraph_Kernel(
+            D=args.batch_cov_horizon, 
+            K_r=args.num_mixture_r, 
+            delta_l=args.delta_l, 
+            train_l=args.train_l, 
+            lr=args.loss_lr, 
+            wd=args.loss_wd, 
+            reg_w=args.reg_w,
+            static=False,
+            static_graph=load_static_graph("/home/seyed/forked/mv_pts_correlatederr/datasets/PEMS03_graph.csv", 358)
+        )
+        # loss = GraphBatchMGD_Kernel(D=args.batch_cov_horizon, K_r=args.num_mixture_r, delta_l=args.delta_l, train_l=args.train_l, lr=args.loss_lr, wd=args.loss_wd, reg_w=args.reg_w)
     elif args.loss == 'ar':
         log_file = "%s_batch_%s_B%s_Q%s_H%s_D%s_AR%s_L2Reg%s"%(args.dataset, args.loss, args.batch_size, args.prediction_horizon, args.hidden_size, args.batch_cov_horizon, args.num_mixture_r-1, args.reg_w)
         logger = TensorBoardLogger(save_dir="logs", name=args.model, version=log_file)
@@ -152,6 +176,7 @@ def main():
     trainer = pl.Trainer(
         logger=logger,
         max_steps=configs['train']['max_steps'],
+        max_epochs=50,
         accelerator='gpu',
         devices=[args.device],
         enable_model_summary=True,

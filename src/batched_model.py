@@ -9,6 +9,7 @@ from tqdm.autonotebook import tqdm
 import matplotlib.pyplot as plt
 
 from pytorch_forecasting import DeepAR
+# from pytorch_forecasting.models.xlstm import xLSTMTime
 from pytorch_forecasting.models.base_model import AutoRegressiveBaseModelWithCovariates
 from pytorch_forecasting.models.nn import HiddenState
 from pytorch_forecasting.models.base_model import _torch_cat_na, _concatenate_output
@@ -34,26 +35,39 @@ from pytorch_forecasting.utils import (
     to_list,
 )
 
+from dynamic_graph import SAGSAM, precision_from_adj
 from model import ARTransformer
+import math
 
 
 class BatchedEstimator(AutoRegressiveBaseModelWithCovariates):
     def __init__(
         self,
+        # graph_embed_dim: int = 16, static_adj=None,
         **kwargs
     ):
         super().__init__(**kwargs)
 
-        if self.loss.name == 'BatchMGD_Kernel':
+        if self.loss.name in ('BatchMGD_Kernel', 'BatchMGDGraph_Kernel'):
             if self.loss.K_r > 1:
                 self.mixture_projector_r = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.K_r), nn.Softmax(dim=-1)) if self.loss.n_layer == 1 else nn.Sequential(nn.Linear(self.hparams.hidden_size, int(self.hparams.hidden_size/2)), nn.ELU(), nn.Linear(int(self.hparams.hidden_size/2), self.loss.K_r), nn.Softmax(dim=-1))
             if self.loss.K_d > 1:
                 self.mixture_projector_d = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.K_d), nn.Softmax(dim=-1)) if self.loss.n_layer == 1 else nn.Sequential(nn.Linear(self.hparams.hidden_size, int(self.hparams.hidden_size/2)), nn.ELU(), nn.Linear(int(self.hparams.hidden_size/2), self.loss.K_d), nn.Softmax(dim=-1))
+            self.mixture_graph_projector = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.num_graph_kernels), nn.Softmax(dim=-1))
         elif self.loss.name == 'BatchMGD_AR':
             if self.loss.K_r > 1:
                 self.mixture_projector_r = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.K_r-1), nn.Tanh()) if self.loss.n_layer == 1 else nn.Sequential(nn.Linear(self.hparams.hidden_size, int(self.hparams.hidden_size/2)), nn.ELU(), nn.Linear(int(self.hparams.hidden_size/2), self.loss.K_r-1), nn.Tanh())
             if self.loss.K_d > 1:
                 self.mixture_projector_d = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.K_d-1),  nn.Tanh()) if self.loss.n_layer == 1 else nn.Sequential(nn.Linear(self.hparams.hidden_size, int(self.hparams.hidden_size/2)), nn.ELU(), nn.Linear(int(self.hparams.hidden_size/2), self.loss.K_d-1),  nn.Tanh())
+        
+        # self.num_nodes = 358
+        # self.sagsam = SAGSAM(
+        #     num_nodes=self.num_nodes,
+        #     embed_dim=graph_embed_dim,
+        #     static_adj=static_adj,
+        #     dropout=0.1,
+        # )
+
 
     def configure_optimizers(self):
             # either set a schedule of lrs or find it dynamically
@@ -145,9 +159,12 @@ class BatchedEstimator(AutoRegressiveBaseModelWithCovariates):
         if self.loss.K_r > 1 and self.loss.K_d > 1:
             mixture_weights_r = self.mixture_projector_r(decoder_output)
             mixture_weights_d = self.mixture_projector_d(decoder_output)
-            mixture_weights = torch.cat([mixture_weights_r, mixture_weights_d], dim=-1)
+            mixture_weights_graph = self.mixture_graph_projector(decoder_output)
+            mixture_weights = torch.cat([mixture_weights_r, mixture_weights_d, mixture_weights_graph], dim=-1)
         elif self.loss.K_r > 1:
             mixture_weights = self.mixture_projector_r(decoder_output)
+            mixture_weights_graph = self.mixture_graph_projector(decoder_output)
+            mixture_weights = torch.cat([mixture_weights, mixture_weights_graph], dim=-1)
         elif self.loss.K_d > 1:
             mixture_weights = self.mixture_projector_d(decoder_output)
 
@@ -155,6 +172,17 @@ class BatchedEstimator(AutoRegressiveBaseModelWithCovariates):
 
 
 class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
+    def _get_factor_cov(self, mixture_weights):
+        """Return (G_t, G_t_inv) – graph-driven factor covariance or (I_R, I_R)."""
+        if hasattr(self.loss, 'graph_factor_kernel'):
+            graph_weights = mixture_weights[..., -self.loss.num_graph_kernels:]
+            G_t = self.loss.graph_factor_kernel(graph_weights)   # (R, R)
+            G_t_inv = torch.linalg.inv(G_t).contiguous()
+        else:
+            G_t = self.loss.eye_r
+            G_t_inv = self.loss.eye_r  # inv(I_R) = I_R
+        return G_t, G_t_inv
+
     def get_cond_cov(self, current_decoder_output, x, n_samples):
         N = x.shape[2]
         # N = prediction_params_all.shape[0]
@@ -172,18 +200,24 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
         cov_fac = torch.stack([torch.block_diag(*x[i,...,4:]) for i in range(n_samples)])
         diag_fac = torch.stack([torch.block_diag(*torch.diag_embed(x[i,...,3])) for i in range(n_samples)])
 
+        # --- graph-driven factor covariance ---
+        G_t, G_t_inv = self._get_factor_cov(mixture_weights)
+
         D_inv = torch.diag_embed((1/x[:,:-1,...,3]).flatten(start_dim=1))
         A = cov_fac[:, :(self.loss.batch_cov_horizon-1)*N, :(self.loss.batch_cov_horizon-1)*self.loss.rank]
-        C_inv = torch.kron(torch.inverse(corr_mat_r[:self.loss.batch_cov_horizon-1, :self.loss.batch_cov_horizon-1]).contiguous(), self.loss.eye)
+        C_inv = torch.kron(torch.inverse(corr_mat_r[:self.loss.batch_cov_horizon-1, :self.loss.batch_cov_horizon-1]).contiguous(), G_t_inv)
         cov_11_inv = D_inv - D_inv@A@torch.inverse(C_inv+A.mT@D_inv@A)@A.mT@D_inv
 
-        Sigma = cov_fac@torch.kron(corr_mat_r, self.loss.eye)@cov_fac.mT + diag_fac
+        Sigma = cov_fac@torch.kron(corr_mat_r, G_t)@cov_fac.mT + diag_fac
         cov_21 = Sigma[..., -N:, :-N]
 
         return mixture_weights, cov_21, cov_11_inv
 
     def get_cond_cov_fast(self, current_decoder_output, x, n_samples):
         mixture_weights = self.get_dynamic_weights(current_decoder_output)  # (B*n_sample, 1, H) -> (B*n_sample, 1, 2)
+
+        # --- graph-driven factor covariance (G_t replaces I_R) ---
+        G_t, G_t_inv = self._get_factor_cov(mixture_weights)
 
         if self.loss.K_r > 1 and self.loss.K_d > 1:
             corr_mat_r = self.loss.get_corr(mixture_weights[..., :self.loss.K_r], self.loss.K_r)
@@ -197,10 +231,10 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
             D_inv = torch.kron(torch.linalg.inv(corr_mat_d[:self.batch_cov_horizon-1, :self.batch_cov_horizon-1]).contiguous(), self.eye_b)@torch.diag_embed((1/x[:,:-1,...,3]).flatten(start_dim=1))
 
             A = cov_fac[:, :(self.batch_cov_horizon-1)*N, :(self.batch_cov_horizon-1)*self.rank]
-            C_inv = torch.kron(torch.inverse(corr_mat_r[:self.batch_cov_horizon-1, :self.batch_cov_horizon-1]).contiguous(), self.eye_r)
+            C_inv = torch.kron(torch.inverse(corr_mat_r[:self.batch_cov_horizon-1, :self.batch_cov_horizon-1]).contiguous(), G_t_inv)
             cov_11_inv = D_inv - D_inv@A@torch.inverse(C_inv+A.mT@D_inv@A)@A.mT@D_inv
 
-            Sigma = cov_fac@torch.kron(corr_mat_r, self.eye_r)@cov_fac.mT + diag_fac@torch.kron(corr_mat_d, self.eye_b)
+            Sigma = cov_fac@torch.kron(corr_mat_r, G_t)@cov_fac.mT + diag_fac@torch.kron(corr_mat_d, self.eye_b)
         elif self.loss.K_r > 1:
             # calculate cov_11_inv
             # calculate capacitance_tril_11
@@ -209,7 +243,7 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
 
             AtDinvA11 = torch.cat([torch.block_diag(*torch.matmul(A11t_D11inv[i], A11[i])).unsqueeze(0) for i in range(n_samples)])
 
-            Lcap11 = torch.linalg.cholesky(torch.kron(torch.linalg.inv(corr_mat_r[:-1, :-1]).contiguous(), self.loss.eye_r) + AtDinvA11)  # (n_sample, DR, DR)
+            Lcap11 = torch.linalg.cholesky(torch.kron(torch.linalg.inv(corr_mat_r[:-1, :-1]).contiguous(), G_t_inv) + AtDinvA11)  # (n_sample, DR, DR)
 
             A11t_D11inv = torch.cat([torch.block_diag(*A11t_D11inv[i]).unsqueeze(0) for i in range(n_samples)])
 
@@ -218,8 +252,8 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
             m = cov_11_inv.shape[-1]
             cov_11_inv.view(-1, m * m)[:, ::m + 1] += 1/D11.flatten(start_dim=1)
 
-            # calculate cov_21
-            cov_21 = torch.cat([corr_mat_r[-1-i, 0]*x[:,-1,...,4:]@x[:,i,...,4:].mT for i in range(self.loss.batch_cov_horizon-1)], dim=-1)
+            # calculate cov_21:  Σ[D-1, i] = C[D-1,i] · L_{D-1} G_t L_i^T
+            cov_21 = torch.cat([corr_mat_r[-1-i, 0]*x[:,-1,...,4:]@G_t@x[:,i,...,4:].mT for i in range(self.loss.batch_cov_horizon-1)], dim=-1)
         elif self.loss.K_d > 1:
             D_inv = torch.kron(torch.linalg.inv(corr_mat_d[:self.batch_cov_horizon-1, :self.batch_cov_horizon-1]).contiguous(), self.eye_b)@torch.diag_embed((1/x[:,:-1,...,3]).flatten(start_dim=1))
 
@@ -270,8 +304,17 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
         x = prediction_params_all.permute(1, 2, 0, 3)
         N = x.shape[2]
 
-        # calculate cov_22
-        cov_22 = x[:,-1,...,4:]@x[:,-1,...,4:].mT
+        # calculate cov_22:  Σ_{22} = L_D  G_t  L_D^T + diag(d_D)
+        if hasattr(self.loss, 'graph_factor_kernel'):
+            # G_t will be recomputed inside get_cond_cov_fast with proper
+            # mixture weights; here we need a quick forward for cov_22.
+            # Use uniform graph weights as a reasonable default (weights
+            # are re-derived from decoder_output inside get_cond_cov_fast).
+            _mw = self.get_dynamic_weights(current_decoder_output)
+            _G_t, _ = self._get_factor_cov(_mw)
+            cov_22 = x[:,-1,...,4:]@_G_t@x[:,-1,...,4:].mT
+        else:
+            cov_22 = x[:,-1,...,4:]@x[:,-1,...,4:].mT
         cov_22.view(-1, N * N)[:, ::N + 1] += x[:,-1,...,3]
 
         if self.wReg:
@@ -750,6 +793,17 @@ class BatchDeepAREstimator(BatchedEstimator, DeepAR):
             mixture_weights = self.get_dynamic_weights(decoder_output)
             output = torch.cat([output, mixture_weights], dim=-1)
 
+        # # Compute graph adjacency from decoder hidden states (B = num nodes in batch)
+        # if hasattr(self.loss, 'set_graph_adj'):
+        #     B_nodes = decoder_output.shape[0]  # batch_size = num nodes in this batch
+        #     node_h = decoder_output.mean(dim=1)  # (B_nodes, H) — per-node summary
+        #     # Compute data-driven adjacency from node hidden representations
+        #     attn = torch.mm(node_h, node_h.T) / math.sqrt(node_h.shape[-1])  # (B, B)
+        #     attn = torch.relu(attn)
+        #     adj = torch.softmax(attn, dim=-1)
+        #     adj = 0.5 * (adj + adj.T)  # symmetrize
+        #     self.loss.set_graph_adj(adj)
+
         return self.to_network_output(prediction=output)
 
 
@@ -1050,6 +1104,16 @@ class BatchGPTEstimator(BatchedEstimator, ARTransformer):
         if not self.loss.static:
             mixture_weights = self.get_dynamic_weights(decoder_output)
             output = torch.cat([output, mixture_weights], dim=-1)
+
+        # # Compute graph adjacency from decoder hidden states (B = num nodes in batch)
+        # if hasattr(self.loss, 'set_graph_adj'):
+        #     B_nodes = decoder_output.shape[0]
+        #     node_h = decoder_output.mean(dim=1)
+        #     attn = torch.mm(node_h, node_h.T) / math.sqrt(node_h.shape[-1])
+        #     attn = torch.relu(attn)
+        #     adj = torch.softmax(attn, dim=-1)
+        #     adj = 0.5 * (adj + adj.T)
+        #     self.loss.set_graph_adj(adj)
 
         return self.to_network_output(prediction=output)
 
