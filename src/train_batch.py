@@ -522,7 +522,7 @@ args.loss_wd = float(configs['train']['weight_decay'])
 
 video_predictions = True
 # args.direct_inference = True
-# args.checkpoint = "/home/seyed/forked/mv_pts_correlatederr/logs/gpt/pems03_flow_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False/checkpoints/epoch=41-val_loss=86.80.ckpt"
+# args.checkpoint = "PATH/logs/gpt/pems03_flow_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False/checkpoints/epoch=41-val_loss=86.80.ckpt"
 def main():
     """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
     Traffic data
@@ -595,9 +595,9 @@ def main():
     early_stop_callback = EarlyStopping(monitor="val_loss", patience=10, verbose=False, mode="min")
     checkpoint_callback = ModelCheckpoint(filename='{epoch}-{val_loss:.2f}', save_top_k=1, monitor="val_loss", mode="min")
     if args.dataset == "pems03_flow":
-        static_graph = load_static_graph("/home/seyed/forked/mv_pts_correlatederr/datasets/PEMS03_graph.csv", 358)
+        static_graph = load_static_graph("PATH/datasets/PEMS03_graph.csv", 358)
     elif args.dataset == "brussels":
-        static_graph = load_static_graph_from_pickle("/home/seyed/forked/mv_pts_correlatederr/exps/adjacency_matrix.pkl")
+        static_graph = load_static_graph_from_pickle("PATH/exps/adjacency_matrix.pkl")
     else:
         static_graph = None
     if args.loss == 'kernel':
@@ -617,7 +617,7 @@ def main():
         #     wd=args.loss_wd, 
         #     reg_w=args.reg_w,
         #     static=False,
-        #     static_graph=load_static_graph("/home/seyed/forked/mv_pts_correlatederr/datasets/PEMS03_graph.csv", 358)
+        #     static_graph=load_static_graph("PATH/datasets/PEMS03_graph.csv", 358)
         # )
         loss = BatchMGDDiffusion_Kernel(
             D=args.batch_cov_horizon,
