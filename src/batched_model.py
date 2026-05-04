@@ -1,5 +1,4 @@
 from typing import Any, Callable, Dict, List, Tuple, Union
-
 import torch
 from torch import nn
 import numpy as np
@@ -36,7 +35,7 @@ from pytorch_forecasting.utils import (
 )
 
 from dynamic_graph import SAGSAM, precision_from_adj
-from model import ARTransformer
+from model import ARTransformer, xLSTMBackbone
 import math
 
 
@@ -48,12 +47,19 @@ class BatchedEstimator(AutoRegressiveBaseModelWithCovariates):
     ):
         super().__init__(**kwargs)
 
-        if self.loss.name in ('BatchMGD_Kernel', 'BatchMGDGraph_Kernel'):
+        if self.loss.name in ('BatchMGDDiffusion_Kernel', 'TStudent_BatchMGDCurvature_Kernel', 
+                              'BatchMGD_Kernel', 'BatchMGDGraph_Kernel', 'BatchMGDCurvature_Kernel', 'BatchMGDLearnable_Kernel'):
             if self.loss.K_r > 1:
                 self.mixture_projector_r = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.K_r), nn.Softmax(dim=-1)) if self.loss.n_layer == 1 else nn.Sequential(nn.Linear(self.hparams.hidden_size, int(self.hparams.hidden_size/2)), nn.ELU(), nn.Linear(int(self.hparams.hidden_size/2), self.loss.K_r), nn.Softmax(dim=-1))
             if self.loss.K_d > 1:
                 self.mixture_projector_d = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.K_d), nn.Softmax(dim=-1)) if self.loss.n_layer == 1 else nn.Sequential(nn.Linear(self.hparams.hidden_size, int(self.hparams.hidden_size/2)), nn.ELU(), nn.Linear(int(self.hparams.hidden_size/2), self.loss.K_d), nn.Softmax(dim=-1))
-            self.mixture_graph_projector = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.num_graph_kernels), nn.Softmax(dim=-1))
+            if hasattr(self.loss, 'num_graph_kernels') and self.loss.num_graph_kernels > 0:
+                self.mixture_graph_projector = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.num_graph_kernels), nn.Softmax(dim=-1))
+            # G_t hidden projector — maps decoder hidden → features for time-varying G_t
+            if hasattr(self.loss, 'num_G_hidden') and self.loss.num_G_hidden > 0:
+                self.G_hidden_projector = nn.Sequential(
+                    nn.Linear(self.hparams.hidden_size, self.loss.num_G_hidden),
+                )
         elif self.loss.name == 'BatchMGD_AR':
             if self.loss.K_r > 1:
                 self.mixture_projector_r = nn.Sequential(nn.Linear(self.hparams.hidden_size, self.loss.K_r-1), nn.Tanh()) if self.loss.n_layer == 1 else nn.Sequential(nn.Linear(self.hparams.hidden_size, int(self.hparams.hidden_size/2)), nn.ELU(), nn.Linear(int(self.hparams.hidden_size/2), self.loss.K_r-1), nn.Tanh())
@@ -159,14 +165,22 @@ class BatchedEstimator(AutoRegressiveBaseModelWithCovariates):
         if self.loss.K_r > 1 and self.loss.K_d > 1:
             mixture_weights_r = self.mixture_projector_r(decoder_output)
             mixture_weights_d = self.mixture_projector_d(decoder_output)
-            mixture_weights_graph = self.mixture_graph_projector(decoder_output)
-            mixture_weights = torch.cat([mixture_weights_r, mixture_weights_d, mixture_weights_graph], dim=-1)
+            mixture_weights = torch.cat([mixture_weights_r, mixture_weights_d], dim=-1)
+            if hasattr(self, 'mixture_graph_projector'):
+                mixture_weights_graph = self.mixture_graph_projector(decoder_output)
+                mixture_weights = torch.cat([mixture_weights, mixture_weights_graph], dim=-1)
         elif self.loss.K_r > 1:
             mixture_weights = self.mixture_projector_r(decoder_output)
-            mixture_weights_graph = self.mixture_graph_projector(decoder_output)
-            mixture_weights = torch.cat([mixture_weights, mixture_weights_graph], dim=-1)
+            if hasattr(self, 'mixture_graph_projector'):
+                mixture_weights_graph = self.mixture_graph_projector(decoder_output)
+                mixture_weights = torch.cat([mixture_weights, mixture_weights_graph], dim=-1)
         elif self.loss.K_d > 1:
             mixture_weights = self.mixture_projector_d(decoder_output)
+
+        # Append G_t conditioning features (time-varying factor covariance)
+        if hasattr(self, 'G_hidden_projector'):
+            g_features = self.G_hidden_projector(decoder_output)
+            mixture_weights = torch.cat([mixture_weights, g_features], dim=-1)
 
         return mixture_weights
 
@@ -175,8 +189,29 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
     def _get_factor_cov(self, mixture_weights):
         """Return (G_t, G_t_inv) – graph-driven factor covariance or (I_R, I_R)."""
         if hasattr(self.loss, 'graph_factor_kernel'):
+            # Kernel-mixture approach (BatchMGDGraph_Kernel)
             graph_weights = mixture_weights[..., -self.loss.num_graph_kernels:]
             G_t = self.loss.graph_factor_kernel(graph_weights)   # (R, R)
+            G_t_inv = torch.linalg.inv(G_t).contiguous()
+        elif hasattr(self.loss, 'curvature_precision'):
+            # Curvature-aware precision approach (BatchMGDCurvature_Kernel)
+            G_t = self.loss.curvature_precision()                # (R, R)
+            G_t_inv = torch.linalg.inv(G_t).contiguous()
+        elif hasattr(self.loss, 'diffusion_cov'):
+            # Graph diffusion covariance (BatchMGDDiffusion_Kernel)
+            # Uses node_repr_buffer populated during training — at inference time
+            # the buffer holds the EMA of the last training-time hidden states.
+            G_t = self.loss.diffusion_cov()                      # (R, R)
+            G_t_inv = torch.linalg.inv(G_t).contiguous()
+        elif hasattr(self.loss, 'learnable_factor_cov'):
+            # Learnable factor covariance (BatchMGDLearnable_Kernel)
+            # Pass hidden features for time-varying G_t if available
+            if hasattr(self.loss, 'num_G_hidden') and self.loss.num_G_hidden > 0:
+                g_hidden = mixture_weights[..., -self.loss.num_G_hidden:]
+                g_hidden_pooled = g_hidden.mean(dim=tuple(range(g_hidden.dim() - 1)))  # (num_G_hidden,)
+                G_t = self.loss.learnable_factor_cov(g_hidden_pooled)
+            else:
+                G_t = self.loss.learnable_factor_cov()           # (R, R)
             G_t_inv = torch.linalg.inv(G_t).contiguous()
         else:
             G_t = self.loss.eye_r
@@ -305,11 +340,9 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
         N = x.shape[2]
 
         # calculate cov_22:  Σ_{22} = L_D  G_t  L_D^T + diag(d_D)
-        if hasattr(self.loss, 'graph_factor_kernel'):
+        if hasattr(self.loss, 'graph_factor_kernel') or hasattr(self.loss, 'curvature_precision') or hasattr(self.loss, 'learnable_factor_cov') or hasattr(self.loss, 'diffusion_cov'):
             # G_t will be recomputed inside get_cond_cov_fast with proper
             # mixture weights; here we need a quick forward for cov_22.
-            # Use uniform graph weights as a reasonable default (weights
-            # are re-derived from decoder_output inside get_cond_cov_fast).
             _mw = self.get_dynamic_weights(current_decoder_output)
             _G_t, _ = self._get_factor_cov(_mw)
             cov_22 = x[:,-1,...,4:]@_G_t@x[:,-1,...,4:].mT
@@ -370,7 +403,7 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
             return prediction, input_target, torch.ones_like(prediction, device=prediction.device)
         else:
             return prediction, input_target, mixture_weights, prediction_parameters
-
+    
     def predict(
         self,
         data: Union[DataLoader, pd.DataFrame, TimeSeriesDataSet],
@@ -441,6 +474,7 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
         actual = []
         target_scale = []
         progress_bar = tqdm(desc="Predict", unit=" batches", total=len(dataloader), disable=not show_progress_bar)
+        raw_params = []
         with torch.no_grad():
             for x, y in dataloader:
                 # move data to appropriate device
@@ -448,10 +482,12 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
                 if data_device != self.device:
                     x = move_to_device(x, self.device)
                     y = move_to_device(y, self.device)
-
                 # make prediction
-                out, w, pred_param = self(x, **kwargs)  # raw output is dictionary
-
+                out, w, pred_param, raw_param = self(x, **kwargs)  # raw output is dictionary
+                try:
+                    raw_params.append(self.extract_sigma(out, raw_param))
+                except RuntimeError:
+                    raw_params.append(None)
                 lengths = x["decoder_lengths"]
                 if return_decoder_lengths:
                     decode_lenghts.append(lengths)
@@ -511,7 +547,7 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
                 progress_bar.update()
                 if fast_dev_run:
                     break
-
+        raw_params = raw_params[0]
         # concatenate output (of different batches)
         if isinstance(mode, (tuple, list)) or mode != "raw":
             if isinstance(output[0], (tuple, list)) and len(output[0]) > 0 and isinstance(output[0][0], torch.Tensor):
@@ -538,7 +574,7 @@ class BatchedPredictor(AutoRegressiveBaseModelWithCovariates):
             output.append(_concatenate_output(param_list))
         if return_scale:
             output.append(torch.cat(target_scale))
-        return output
+        return output, raw_params
 
     def plot_prediction(
         self,
@@ -1242,6 +1278,23 @@ class BatchGPTPredictor(BatchedPredictor, BatchGPTEstimator):
             weights = apply_to_list(weights, lambda x: x.reshape(-1, n_samples, decoder_length, weights.shape[-1]).permute(0, 2, 3, 1))
             return output, weights, pred_params
 
+    def extract_sigma(self, decoder_output, prediction_parameters):
+        # Extract components
+        prediction_parameters = prediction_parameters.median(dim=-2)[0]  # (B, T, dist_proj)
+        _ = prediction_parameters[:, :, 2:3]           # (B, T, 1) 
+        sigma_sq = prediction_parameters[:, :, 3:4]     # (B, T, 1)
+        L_factors = prediction_parameters[:, :, 4:]     # (B, T, rank)
+
+        # Build batch covariance using the loss function's approach
+        mixture_weights = self.get_dynamic_weights(decoder_output.prediction[:,-1,:10])
+        corr_mat = self.loss.get_corr(mixture_weights.unsqueeze(1), self.loss.K_r)
+        G_t, _ = self._get_factor_cov(mixture_weights)
+
+        # Construct Σ_bat = L·(C⊗G)·L^T + diag(d)
+        cov_factors = torch.block_diag(*L_factors)  # Stack L matrices
+        batch_cov = (cov_factors[:, :120] @ torch.kron(corr_mat, G_t) @ cov_factors[:, :120].T) + torch.diag(sigma_sq.flatten())
+        return batch_cov
+    
     def forward(self, x: Dict[str, torch.Tensor], n_samples: int = None) -> Dict[str, torch.Tensor]:
         """
         Forward network
@@ -1278,7 +1331,7 @@ class BatchGPTPredictor(BatchedPredictor, BatchGPTEstimator):
         if pred_params is None:
             return self.to_network_output(prediction=output), self.to_network_output(prediction=weights)
         else:
-            return self.to_network_output(prediction=output), self.to_network_output(prediction=weights[...,0]), self.to_network_output(prediction=torch.cat([encoder_dist_params, pred_params[:,:,0]], dim=1))
+            return self.to_network_output(prediction=output), self.to_network_output(prediction=weights[...,0]), self.to_network_output(prediction=torch.cat([encoder_dist_params, pred_params[:,:,0]], dim=1)), pred_params
 
     # def predict(
     #     self,
@@ -1577,3 +1630,264 @@ class BatchGPTPredictor(BatchedPredictor, BatchGPTEstimator):
     #     else:
     #         return fig
 
+
+class BatchxLSTMEstimator(BatchedEstimator, xLSTMBackbone):
+    """
+    Batched 1-step xLSTM model — slides a window over each decoder step,
+    re-encoding the full context through xLSTM each time (analogous to
+    BatchGPTEstimator but with xLSTM instead of Transformer).
+    """
+
+    def decode_all(
+        self,
+        input_vector: torch.Tensor,
+        decoder_length: int = None,
+    ):
+        src = self.add_input_vector(input_vector)
+        output, _ = self._run_lstm(src)
+        decoder_output = output[:, -decoder_length:]
+        if isinstance(self.hparams.target, str):  # single target
+            dist_params = self.distribution_projector(decoder_output)
+        else:
+            dist_params = [projector(decoder_output) for projector in self.distribution_projector]
+        return dist_params, decoder_output
+
+    def decode(
+        self,
+        input_vector: torch.Tensor,
+        decoder_length: int,
+        target_scale: torch.Tensor,
+        n_samples: int = None,
+    ) -> Tuple[torch.Tensor, bool]:
+        if n_samples is None:
+            output, decoder_output = self.decode_all(input_vector, decoder_length)
+            output = self.transform_output(output, target_scale=target_scale)
+        else:
+            target_pos = self.target_positions
+            lagged_target_positions = self.lagged_target_positions
+            input_vector = input_vector.repeat_interleave(n_samples, 0)
+            target_scale = apply_to_list(target_scale, lambda x: x.repeat_interleave(n_samples, 0))
+
+            def decode_one(idx, lagged_targets, decoder_length):
+                x = input_vector[:, :decoder_length + idx]
+                lagged_targets = torch.stack(lagged_targets, dim=1)
+                x[:, decoder_length - 1:, target_pos] = lagged_targets
+                for lag, lag_positions in lagged_target_positions.items():
+                    if idx > lag:
+                        x[:, 0, lag_positions] = lagged_targets[-lag]
+                prediction = self.decode_all(x, lagged_targets.shape[1])
+                prediction = apply_to_list(prediction, lambda x: x[:, -1])
+                return prediction
+
+            output = self.decode_autoregressive(
+                decode_one,
+                first_target=input_vector[:, -decoder_length, target_pos],
+                target_scale=target_scale,
+                n_decoder_steps=decoder_length,
+                n_samples=n_samples,
+            )
+            output = apply_to_list(output, lambda x: x.reshape(-1, n_samples, decoder_length).permute(0, 2, 1))
+        return output, decoder_output
+
+    def forward(self, x: Dict[str, torch.Tensor], n_samples: int = None) -> Dict[str, torch.Tensor]:
+        outputs = []
+        decoder_outputs = []
+        for i in range(x["decoder_lengths"][0]):
+            x_cat = torch.cat([x["encoder_cat"][:, i:], x["decoder_cat"][:, :i + 1]], dim=1)
+            x_cont = torch.cat([x["encoder_cont"][:, i:], x["decoder_cont"][:, :i + 1]], dim=1)
+
+            input_vector = self.construct_input_vector(x_cat, x_cont)
+
+            if self.training:
+                assert n_samples is None, "cannot sample from decoder when training"
+
+            output, decoder_output = self.decode(
+                input_vector,
+                decoder_length=1,
+                target_scale=x["target_scale"],
+                n_samples=n_samples,
+            )
+
+            outputs.append(output)
+            decoder_outputs.append(decoder_output)
+
+        output = torch.cat(outputs, dim=1)
+        decoder_output = torch.cat(decoder_outputs, dim=1)
+
+        if not self.loss.static:
+            mixture_weights = self.get_dynamic_weights(decoder_output)
+            output = torch.cat([output, mixture_weights], dim=-1)
+
+        return self.to_network_output(prediction=output)
+
+
+class BatchxLSTMPredictor(BatchedPredictor, BatchxLSTMEstimator):
+    """
+    Batched xLSTM predictor with conditional sampling via GPR at test time
+    (analogous to BatchGPTPredictor but with xLSTM backbone).
+    """
+
+    def decode_autoregressive(
+        self,
+        decode_one: Callable,
+        first_target: Union[List[torch.Tensor], torch.Tensor],
+        target_scale: Union[List[torch.Tensor], torch.Tensor],
+        n_decoder_steps: int,
+        n_samples: int = 1,
+        pre_normed_outputs: torch.Tensor = None,
+        **kwargs,
+    ) -> Union[List[torch.Tensor], torch.Tensor]:
+
+        # make predictions which are fed into next step
+        output = []
+        weights = []
+        pred_params = []
+        normalized_output = [first_target]
+        for idx in range(n_decoder_steps):
+            # get lagged targets
+            normed_prediction_params, current_decoder_output = decode_one(
+                idx, lagged_targets=normalized_output, decoder_length=n_decoder_steps, **kwargs
+            )
+
+            # get prediction and its normalized version for the next step
+            prediction, current_target, mixture_weights, prediction_parameters = self.output_to_prediction(
+                normalized_prediction_parameters=normed_prediction_params[:, -1],
+                target_scale=target_scale,
+                n_samples=n_samples,
+                pre_normed_prediction_params=normed_prediction_params[:, :-1][:, -self.loss.batch_cov_horizon + 1:],
+                x_1=pre_normed_outputs,
+                current_decoder_output=current_decoder_output,
+            )
+            # save normalized output for lagged targets
+            normalized_output.append(current_target)
+
+            pre_normed_outputs = torch.cat([pre_normed_outputs[:, 1:], current_target.unsqueeze(1)], dim=1)
+
+            output.append(prediction)
+            weights.append(mixture_weights)
+            pred_params.append(prediction_parameters)
+
+        if isinstance(self.hparams.target, str):
+            output = torch.stack(output, dim=1)
+            weights = torch.stack(weights, dim=1)
+            pred_params = torch.stack(pred_params, dim=1)
+        else:
+            # for multi-targets
+            output = [torch.stack([out[idx] for out in output], dim=1) for idx in range(len(self.target_positions))]
+        return output, weights, pred_params
+
+    def decode_all(
+        self,
+        input_vector: torch.Tensor,
+        decoder_length: int,
+    ):
+        src = self.add_input_vector(input_vector)
+        output, _ = self._run_lstm(src)
+        if isinstance(self.hparams.target, str):  # single target
+            dist_params = self.distribution_projector(output)
+        else:
+            dist_params = [projector(output) for projector in self.distribution_projector]
+        return dist_params, output[:, -decoder_length:]
+
+    def decode(
+        self,
+        input_vector: torch.Tensor,
+        decoder_length: int,
+        target_scale: torch.Tensor,
+        n_samples: int = None,
+        encoder_output: torch.Tensor = None,
+    ) -> Tuple[torch.Tensor, bool]:
+        if n_samples is None:
+            output, decoder_output = self.decode_all(input_vector, decoder_length)
+            output = self.transform_output(output, target_scale=target_scale)
+            weights = self.get_dynamic_weights(decoder_output)
+            return output, weights, None
+        else:
+            # run in eval, i.e. simulation mode
+            target_pos = self.target_positions
+            lagged_target_positions = self.lagged_target_positions
+            # repeat for n_samples
+            input_vector = input_vector.repeat_interleave(n_samples, 0)
+            target_scale = apply_to_list(target_scale, lambda x: x.repeat_interleave(n_samples, 0))
+
+            encoder_output = encoder_output.repeat_interleave(n_samples, 0)
+
+            # define function to run at every decoding step
+            def decode_one(
+                idx,
+                lagged_targets,
+                decoder_length,
+            ):
+                x = input_vector[:, :decoder_length + idx]
+                x[:, decoder_length - 1:, target_pos] = torch.stack(lagged_targets, dim=1)
+                for lag, lag_positions in lagged_target_positions.items():
+                    if idx > lag:
+                        x[:, 0, lag_positions] = lagged_targets[-lag]
+                prediction, decoder_output = self.decode_all(x, len(lagged_targets))
+                return prediction, decoder_output[:, -1:]
+
+            # make predictions which are fed into next step
+            output, weights, pred_params = self.decode_autoregressive(
+                decode_one,
+                first_target=input_vector[:, -decoder_length, target_pos],
+                target_scale=target_scale,
+                n_decoder_steps=decoder_length,
+                n_samples=n_samples,
+                pre_normed_outputs=encoder_output,
+            )
+            output = apply_to_list(output, lambda x: x.reshape(-1, n_samples, decoder_length).permute(0, 2, 1))
+            weights = apply_to_list(weights, lambda x: x.reshape(-1, n_samples, decoder_length, weights.shape[-1]).permute(0, 2, 3, 1))
+            return output, weights, pred_params
+
+    def extract_sigma(self, decoder_output, prediction_parameters):
+        # Extract components
+        prediction_parameters = prediction_parameters.median(dim=-2)[0]  # (B, T, dist_proj)
+        _ = prediction_parameters[:, :, 2:3]           # (B, T, 1)
+        sigma_sq = prediction_parameters[:, :, 3:4]     # (B, T, 1)
+        L_factors = prediction_parameters[:, :, 4:]     # (B, T, rank)
+
+        # Build batch covariance using the loss function's approach
+        mixture_weights = self.get_dynamic_weights(decoder_output.prediction[:, -1, :10])
+        corr_mat = self.loss.get_corr(mixture_weights.unsqueeze(1), self.loss.K_r)
+        G_t, _ = self._get_factor_cov(mixture_weights)
+
+        # Construct Sigma_bat = L·(C⊗G)·L^T + diag(d)
+        cov_factors = torch.block_diag(*L_factors)  # Stack L matrices
+        batch_cov = (cov_factors[:, :120] @ torch.kron(corr_mat, G_t) @ cov_factors[:, :120].T) + torch.diag(sigma_sq.flatten())
+        return batch_cov
+
+    def forward(self, x: Dict[str, torch.Tensor], n_samples: int = None) -> Dict[str, torch.Tensor]:
+        """Forward network."""
+        x_cat = torch.cat([x["encoder_cat"], x["decoder_cat"]], dim=1)
+        x_cont = torch.cat([x["encoder_cont"], x["decoder_cont"]], dim=1)
+
+        input_vector = self.construct_input_vector(x_cat, x_cont)
+        decoder_length = int(x["decoder_lengths"].max())
+
+        # Encode: process encoder portion through xLSTM
+        src = self.add_input_vector(input_vector[:, :-decoder_length])
+        encoder_output, _ = self._run_lstm(src)
+        if isinstance(self.hparams.target, str):  # single target
+            encoder_dist_params = self.distribution_projector(encoder_output)
+        else:
+            encoder_dist_params = [projector(encoder_output) for projector in self.distribution_projector]
+
+        if self.training:
+            assert n_samples is None, "cannot sample from decoder when training"
+
+        output, weights, pred_params = self.decode(
+            input_vector,
+            decoder_length=decoder_length,
+            target_scale=x["target_scale"],
+            n_samples=n_samples,
+            encoder_output=x["encoder_cont"][:, -self.loss.batch_cov_horizon + 1:, :1],
+        )
+
+        encoder_dist_params = self.transform_output(
+            prediction=encoder_dist_params, target_scale=x["target_scale"]
+        )
+
+        if pred_params is None:
+            return self.to_network_output(prediction=output), self.to_network_output(prediction=weights)
+        else:
+            return self.to_network_output(prediction=output), self.to_network_output(prediction=weights[..., 0]), self.to_network_output(prediction=torch.cat([encoder_dist_params, pred_params[:, :, 0]], dim=1)), pred_params

@@ -46,3 +46,10 @@ python .\src\train_batch.py --model deepar --dataset m4_hourly --loss kernel --n
   year={2024}
 }
 ```
+
+```
+graph TD;
+    A-->B;
+    A-->C;
+    B-->D;
+    C-->D;

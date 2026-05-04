@@ -8,8 +8,9 @@ Reference:
 - DG-LoGraP methodology for grouped latent spatio-temporal residual models
 """
 
+import pickle
 import math
-from typing import Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -60,6 +61,19 @@ def load_static_graph(graph_path: str, num_nodes: int) -> torch.Tensor:
     
     return adj_matrix
 
+def load_static_graph_from_pickle(pickle_path: str) -> torch.Tensor:
+    """
+    Load static graph adjacency matrix from a pickle file.
+    
+    Args:
+        pickle_path: Path to the pickle file containing the adjacency matrix
+    Returns:
+        adj_matrix: Static adjacency matrix (N, N)
+    """
+    _, _, adj_matrix = pickle.load(open(pickle_path, "rb"))
+    adj_matrix = torch.from_numpy(adj_matrix).float()
+    return adj_matrix
+
 
 import torch
 import torch.nn.functional as F
@@ -91,6 +105,701 @@ def precision_from_adj(
     I = torch.eye(N, device=A.device, dtype=A.dtype)
     Q = alpha * I + beta * L
     return Q
+
+
+# =====================================================================
+# Curvature-Aware Graph Precision  (Steps A → B → C of the proposal)
+# =====================================================================
+
+def _balanced_forman_curvature(W: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Compute the Balanced Forman curvature proxy for every edge of an
+    undirected weighted graph.
+
+    W : (N, N) symmetric non-negative weight matrix (may contain self-loops).
+    Returns κ : (N, N) curvature matrix (only meaningful where W > 0).
+
+    **Revision (addressing reviewer §1.i):**
+    Self-loops are removed before computing degrees and curvature, because
+    self-loop weights inflate d_i and shift all κ positive, hiding the
+    bridge / bottleneck edges that should have *negative* curvature.
+
+    The Balanced Forman curvature κ_{ij} for edge (i,j) with weight w_{ij}:
+
+        κ_{ij} = w_{ij} · ( 1/√d_i + 1/√d_j )
+               + w_{ij} · Σ_{k ∈ Δ(i,j)} ( √(w_ik/d_i) + √(w_jk/d_j) )
+               − w_{ij}
+
+    where d_i = Σ_{k≠i} w_{ik}  (no self-loop) and Δ(i,j) is the set of
+    common neighbours.
+    """
+    # Remove self-loops so degrees reflect only inter-node connectivity.
+    # .clone() keeps the autograd graph alive for differentiable W.
+    W_clean = W.clone()
+    W_clean = W_clean - torch.diag(torch.diag(W_clean))        # zero diagonal
+
+    N = W_clean.shape[0]
+    mask = (W_clean > 0).float().detach()                      # topology fixed
+
+    deg = W_clean.sum(dim=-1).clamp(min=eps)                   # (N,)
+    inv_sqrt_deg = torch.rsqrt(deg)                            # (N,)
+
+    # Term 1:  w_{ij} * (1/√d_i + 1/√d_j)
+    term1 = W_clean * (inv_sqrt_deg.unsqueeze(1) + inv_sqrt_deg.unsqueeze(0))
+
+    # Triangle term (common-neighbour contribution)
+    A_bin = mask                                               # binary topology
+    triangles = A_bin @ A_bin                                  # #common neighbours
+    W_normed = W_clean / deg.unsqueeze(1).clamp(min=eps).sqrt()
+    triangle_weight = W_normed @ W_normed.T
+    term2 = W_clean * triangle_weight * (triangles > 0).float().detach()
+
+    kappa = (term1 + term2 - W_clean) * mask                   # (N, N)
+    return kappa
+
+def _balanced_forman(W: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Lightweight Balanced-Forman curvature proxy.
+        κ_{ij} = 2/d_max * (#triangles through (i,j)) / (d_i + d_j - 2)
+    Returns edge-curvature matrix  (N, N), same sparsity pattern as W.
+    """
+    # degree vector
+    deg = W.sum(dim=-1)                          # (N,)
+    # triangle count proxy: (W^2)_{ij}
+    tri  = torch.mm(W, W)                        # (N, N)
+    d_i  = deg.unsqueeze(1).expand_as(W)
+    d_j  = deg.unsqueeze(0).expand_as(W)
+    denom = (d_i + d_j - 2).clamp(min=eps)
+    d_max = deg.max().clamp(min=eps)
+    kappa = (2.0 / d_max) * tri / denom
+    return kappa * (W > 0).float()               # zero out non-edges
+
+
+def _reweight_laplacian(
+    static_adj: torch.Tensor,     # (N, N)  fixed binary/weighted adjacency
+    lam:        torch.Tensor,     # scalar learnable
+    kappa_0:    torch.Tensor,     # scalar learnable
+    tau:        torch.Tensor,     # scalar learnable
+) -> torch.Tensor:
+    """
+    Steps A-C from the paper:
+        W'_{ij} = W_{ij} (1 + λ · softplus(τ(κ₀ − κ_{ij})))
+    Returns the reweighted normalised Laplacian  L'_t  (N, N).
+    """
+    N = static_adj.shape[0]
+
+    # Step A: symmetrise
+    W = 0.5 * (static_adj + static_adj.t())
+
+    # Step B: curvature + bottleneck score
+    kappa = _balanced_forman(W)
+    b     = F.softplus(tau * (kappa_0 - kappa))  # (N, N)
+
+    # Step C: reweight edges → Laplacian
+    W_prime = W * (1.0 + lam.abs() * b)          # abs() keeps lam sign-free
+    deg     = W_prime.sum(dim=-1)
+    L_prime = torch.diag(deg) - W_prime           # combinatorial Laplacian
+    return L_prime    
+
+
+def _bottleneck_indicator(
+    kappa: torch.Tensor,
+    kappa_0: torch.Tensor,
+    tau: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Distribution-aware soft indicator of bottleneck edges  (Step B).
+
+    **Revision (addressing reviewer §1.ii + §4):**
+    Instead of  b_ij = softplus(τ(κ₀ − κ_ij))  which saturates to ~0 when
+    all κ > κ₀ (reviewer: b_ij ≈ 1e-5, effectively inactive), we use a
+    *relative* formulation based on the edge-curvature distribution:
+
+        z_ij = (μ_κ − κ_ij) / (σ_κ + ε)        # standardised below-mean score
+        b_ij = softplus(τ · (z_ij + κ₀)) · mask  # κ₀ is now a learnable bias
+
+    Edges with *below-average* curvature (relative bottlenecks) get b_ij > 0.
+    The z-score ensures the softplus input is centered near 0 regardless of
+    the absolute curvature magnitude, keeping gradients alive for τ and κ₀.
+    """
+    edge_kappas = kappa[mask > 0]
+    if edge_kappas.numel() == 0:
+        return torch.zeros_like(kappa)
+
+    mu_kappa = edge_kappas.mean()
+    sigma_kappa = edge_kappas.std().clamp(min=1e-6)
+
+    # Standardised below-mean score: positive for below-average curvature
+    z_ij = (mu_kappa - kappa) / sigma_kappa                    # (N, N)
+
+    # κ₀ acts as a learnable bias (shifts the bottleneck threshold)
+    b_ij = F.softplus(tau * (z_ij + kappa_0)) * mask
+    return b_ij
+
+
+class CurvatureAwareGraphPrecision_LearnP(nn.Module):
+    """
+    G_t = (α I_R + β P^T L'_t P)^{-1}
+
+    KEY CHANGE vs original:
+        P ∈ R^{N×R}  is a *learnable* nn.Parameter initialised with the
+        spectral eigenvectors but allowed to move freely during training.
+
+    Because P is no longer constrained to eigenvectors of L, after a few
+    gradient steps P^T L'_t P develops genuine off-diagonal entries
+    → G_t gets non-trivial cross-latent coupling.
+
+    Drop-in usage
+    -------------
+        self.curvature_precision = CurvatureAwareGraphPrecision_LearnP(
+            rank=rank, num_nodes=num_nodes, static_adj=static_graph, ...
+        )
+        G_t = self.curvature_precision()   # (R, R)
+    """
+
+    def __init__(
+        self,
+        rank:       int,
+        num_nodes:  int,
+        static_adj: torch.Tensor,
+        alpha:      float = 0.01,
+        beta:       float = 1.0,
+        lam:        float = 1.0,
+        kappa_0:    float = 0.0,
+        tau:        float = 5.0,
+        sigma_min:  float = 1e-4,
+        init_with_eigenvectors: bool = True,   # warm-start from spectral P
+    ):
+        super().__init__()
+        self.rank      = rank
+        self.num_nodes = num_nodes
+        self.sigma_min = sigma_min
+
+        # Register static adjacency as a buffer (not trained, moves with device)
+        self.register_buffer("static_adj", static_adj.float())
+        self.register_buffer("static_adj_sym", 0.5 * (static_adj + static_adj.T))
+        self.register_buffer("log_gamma", torch.tensor(math.log(max(1e-8, 1.0))))  # Default log_gamma = 0
+        self.register_buffer("log_lam", torch.tensor(math.log(max(1e-8, 1.0))))    # Default log_lam = 0
+        # ── Learnable curvature parameters ──────────────────────────────────
+        self.log_alpha = nn.Parameter(torch.tensor(alpha).log())
+        self.log_beta  = nn.Parameter(torch.tensor(beta).log())
+        self.lam       = nn.Parameter(torch.tensor(lam))
+        self.kappa_0   = nn.Parameter(torch.tensor(kappa_0))
+        self.log_tau   = nn.Parameter(torch.tensor(tau).log())
+
+        # ── THE FIX: learnable P ─────────────────────────────────────────────
+        if init_with_eigenvectors:
+            P_init = self._spectral_init()      # (N, R)  — warm start
+        else:
+            P_init = torch.randn(num_nodes, rank) / (num_nodes ** 0.5)
+
+        # Free parameter — no orthogonality constraint intentionally
+        # (gradient will shape it toward useful directions)
+        self.register_buffer("P_init_cache", P_init.clone())
+        self.P = nn.Parameter(P_init)           # (N, R)
+
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _spectral_init(self) -> torch.Tensor:
+        """Compute bottom-R eigenvectors of the graph Laplacian for warm-start."""
+        W   = 0.5 * (self.static_adj + self.static_adj.t())
+        deg = W.sum(dim=-1)
+        L   = torch.diag(deg) - W
+        try:
+            # eigh returns eigenvalues in ascending order → take first R
+            _, vecs = torch.linalg.eigh(L)
+            return vecs[:, :self.rank].clone()
+        except Exception:
+            return torch.randn(self.num_nodes, self.rank) / (self.num_nodes ** 0.5)
+
+    # ------------------------------------------------------------------
+    def forward(self) -> torch.Tensor:
+        """Returns G_t = Q_t^{-1}  of shape  (R, R)."""
+        alpha = self.log_alpha.exp()
+        beta  = self.log_beta.exp()
+        tau   = self.log_tau.exp()
+
+        # Reweighted Laplacian  L'_t  (N, N)
+        L_prime = _reweight_laplacian(
+            self.static_adj, self.lam, self.kappa_0, tau
+        )
+
+        # ── Project with LEARNED P  →  genuinely non-diagonal ───────────────
+        # Normalise P columns so scale doesn't explode  (optional but stable)
+        P_norm = F.normalize(self.P, dim=0)          # (N, R)
+        L_R    = P_norm.t() @ L_prime @ P_norm        # (R, R)  — NOT diagonal
+
+        # Precision matrix  Q_t = α I_R + β L'_R
+        Q_t = alpha * torch.eye(self.rank, device=L_R.device, dtype=L_R.dtype) \
+            + beta  * L_R
+
+        # Symmetrise for numerical safety before inversion
+        Q_t = 0.5 * (Q_t + Q_t.t())
+
+        # Add floor to diagonal so Q_t is strictly PD
+        Q_t = Q_t + self.sigma_min * torch.eye(
+            self.rank, device=Q_t.device, dtype=Q_t.dtype
+        )
+
+        G_t = torch.linalg.inv(Q_t)                  # (R, R)
+        return G_t
+    
+    def get_P_regularization_loss(self) -> torch.Tensor:
+        """
+        Optional regularization to encourage P to stay close to the initial
+        spectral eigenvectors (prevents drifting too far from a good starting
+        point early in training).
+
+        This can be weighted by a hyperparameter λ_p when added to the main loss.
+        """
+        with torch.no_grad():
+            P_init = self._spectral_init()  # (N, R)
+        return F.mse_loss(self.P, P_init)
+    
+    def get_orthogonality_loss(self) -> torch.Tensor:
+        """
+        Encourages P columns to stay orthonormal: ||P^T P - I||^2_F
+        
+        This allows P to rotate freely away from the spectral basis
+        (which is what we want — to break the diagonal structure)
+        while preventing columns from collapsing or becoming redundant.
+        """
+        R = self.P.shape[1]
+        I = torch.eye(R, device=self.P.device, dtype=self.P.dtype)
+        PtP = self.P.t() @ self.P          # (R, R)
+        return torch.norm(PtP - I, p='fro') ** 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX B  ── Spectral P  +  learned dense correction  V Φ V^T
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CurvatureAwareGraphPrecision_LearnedRotation(nn.Module):
+    """
+    G_t = (α I_R + β P^T L'_t P)^{-1}  +  V Φ V^T
+
+    KEY CHANGE vs original:
+        After computing the (diagonal) spectral precision, we ADD a low-rank
+        dense correction  V Φ V^T  where:
+            V ∈ R^{R×R}  is a learnable orthonormal basis (parameterised via
+                          Cayley map from a skew-symmetric matrix)
+            Φ = diag(softplus(φ))  are learnable positive eigenvalues
+
+        This correction is initialised near zero so training starts from the
+        original spectral G_t and gradually learns off-diagonal structure.
+
+    Drop-in usage
+    -------------
+        self.curvature_precision = CurvatureAwareGraphPrecision_LearnedRotation(
+            rank=rank, num_nodes=num_nodes, static_adj=static_graph, ...
+        )
+        G_t = self.curvature_precision()   # (R, R)
+    """
+
+    def __init__(
+        self,
+        rank:       int,
+        num_nodes:  int,
+        static_adj: torch.Tensor,
+        alpha:      float = 0.01,
+        beta:       float = 1.0,
+        lam:        float = 1.0,
+        kappa_0:    float = 0.0,
+        tau:        float = 5.0,
+        sigma_min:  float = 1e-4,
+        correction_rank: int = None,    # rank of VΦV^T, defaults to R
+    ):
+        super().__init__()
+        self.rank      = rank
+        self.num_nodes = num_nodes
+        self.sigma_min = sigma_min
+        self.cr        = correction_rank if correction_rank is not None else rank
+
+        self.register_buffer("static_adj", static_adj.float())
+
+        # ── Learnable curvature parameters ──────────────────────────────────
+        self.log_alpha = nn.Parameter(torch.tensor(alpha).log())
+        self.log_beta  = nn.Parameter(torch.tensor(beta).log())
+        self.lam       = nn.Parameter(torch.tensor(lam))
+        self.kappa_0   = nn.Parameter(torch.tensor(kappa_0))
+        self.log_tau   = nn.Parameter(torch.tensor(tau).log())
+
+        # ── Fixed spectral projection (same as original, NOT trained) ────────
+        self.register_buffer("P", self._spectral_init())  # (N, R)
+
+        # ── THE FIX: learned rotation + eigenvalues ──────────────────────────
+        # Skew-symmetric matrix → Cayley map → orthonormal V
+        # Initialise near zero so correction starts near 0
+        self.skew_raw = nn.Parameter(
+            torch.zeros(rank, rank)            # anti-symmetric entries
+        )
+        # Correction eigenvalues — initialised small so G_t starts spectral
+        self.log_phi  = nn.Parameter(
+            torch.full((self.cr,), fill_value=-4.0)   # softplus(-4) ≈ 0.018
+        )
+        self.register_buffer("static_adj_sym", 0.5 * (static_adj + static_adj.T))
+        self.register_buffer("log_gamma", torch.tensor(math.log(max(1e-8, 1.0))))  # Default log_gamma = 0
+        self.register_buffer("log_lam", torch.tensor(math.log(max(1e-8, 1.0))))    # Default log_lam = 0
+
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _spectral_init(self) -> torch.Tensor:
+        W   = 0.5 * (self.static_adj + self.static_adj.t())
+        deg = W.sum(dim=-1)
+        L   = torch.diag(deg) - W
+        try:
+            _, vecs = torch.linalg.eigh(L)
+            return vecs[:, :self.rank].clone()
+        except Exception:
+            return torch.randn(self.num_nodes, self.rank) / (self.num_nodes ** 0.5)
+
+    def _cayley_orthogonal(self) -> torch.Tensor:
+        """
+        Cayley map: skew-symmetric A  →  orthonormal V = (I-A)(I+A)^{-1}
+        Guarantees V^T V = I so VΦV^T is a valid symmetric PSD matrix.
+        """
+        A   = self.skew_raw - self.skew_raw.t()         # enforce skew-symmetry
+        I   = torch.eye(self.rank, device=A.device, dtype=A.dtype)
+        V   = torch.linalg.solve(I + A, I - A)          # (I+A)^{-1}(I-A)
+        return V                                         # (R, R) orthonormal
+
+    # ------------------------------------------------------------------
+    def forward(self) -> torch.Tensor:
+        """Returns G_t = spectral_G_t + VΦV^T  of shape  (R, R)."""
+        alpha = self.log_alpha.exp()
+        beta  = self.log_beta.exp()
+        tau   = self.log_tau.exp()
+
+        # ── Spectral part (same as original, diagonal) ───────────────────────
+        L_prime = _reweight_laplacian(
+            self.static_adj, self.lam, self.kappa_0, tau
+        )
+        L_R = self.P.t() @ L_prime @ self.P
+        Q_t = alpha * torch.eye(self.rank, device=L_R.device, dtype=L_R.dtype) \
+            + beta  * L_R
+        Q_t = 0.5 * (Q_t + Q_t.t()) \
+            + self.sigma_min * torch.eye(self.rank, device=Q_t.device, dtype=Q_t.dtype)
+        G_spectral = torch.linalg.inv(Q_t)
+
+        # ── Dense correction  V Φ V^T ────────────────────────────────────────
+        V   = self._cayley_orthogonal()
+        phi = F.softplus(self.log_phi)
+
+        V_cr       = V[:, :self.cr]
+        correction = V_cr @ torch.diag(phi) @ V_cr.t()
+
+        G_t = G_spectral + correction
+
+        # ── Normalize to unit trace so scale matches I_R ─────────────────────
+        G_t = G_t * (self.rank / G_t.trace().clamp(min=1e-6))
+        
+        return G_t
+    
+    def get_orthogonality_loss(self) -> torch.Tensor:
+        """
+        Encourages P columns to stay orthonormal: ||P^T P - I||^2_F
+        
+        This allows P to rotate freely away from the spectral basis
+        (which is what we want — to break the diagonal structure)
+        while preventing columns from collapsing or becoming redundant.
+        """
+        R = self.P.shape[1]
+        I = torch.eye(R, device=self.P.device, dtype=self.P.dtype)
+        PtP = self.P.t() @ self.P          # (R, R)
+        return torch.norm(PtP - I, p='fro') ** 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Learnable Factor Covariance  (bypass Laplacian entirely)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LearnableFactorCovariance(nn.Module):
+    """
+    Directly parameterize G_t as a learnable PSD matrix:
+
+        G_t = I_R  +  U diag(softplus(φ)) U^T
+
+    where U ∈ R^{R×cr} is a learnable low-rank basis and
+    φ ∈ R^{cr} are eigenvalues.
+
+    **Time-varying mode** (hidden_dim > 0):
+        φ(h) = softplus( log_phi_base  +  phi_net(h) )
+
+    The network produces a *residual correction* to the base log-eigenvalues,
+    so at initialisation (phi_net ≈ 0) the module reduces to the static
+    version.  The basis U is shared across all time steps; only the
+    eigenvalue magnitudes vary with hidden state → the *pattern* of
+    cross-factor correlation is learned once, its *strength* adapts to
+    each sequence context.
+
+    Key design choices:
+        · Initialized at I_R so training starts from the kernel baseline.
+        · No dependency on graph Laplacian (which may be degenerate).
+        · Backward-compatible: hidden_dim=0 recovers the original static G_t.
+
+    Drop-in usage
+    -------------
+        # static
+        self.learnable_factor_cov = LearnableFactorCovariance(rank=10, correction_rank=4)
+        G_t = self.learnable_factor_cov()           # (R, R) PD
+
+        # time-varying (hidden_dim > 0)
+        self.learnable_factor_cov = LearnableFactorCovariance(rank=10, correction_rank=4, hidden_dim=16)
+        G_t = self.learnable_factor_cov(h)          # h: (hidden_dim,)  →  (R, R) PD
+    """
+
+    def __init__(
+        self,
+        rank: int,
+        correction_rank: int = None,
+        sigma_min: float = 1e-4,
+        hidden_dim: int = 0,       # 0 = static (backward compat), >0 = time-varying
+    ):
+        super().__init__()
+        self.rank = rank
+        self.sigma_min = sigma_min
+        self.cr = correction_rank if correction_rank is not None else max(1, rank // 2)
+        self.hidden_dim = hidden_dim
+
+        self.U = nn.Parameter(torch.randn(rank, self.cr) * 0.01)   # small random init
+        self.log_phi = nn.Parameter(torch.zeros(self.cr))           # softplus(0)≈0.69, meaningful signal
+
+        # --- Time-varying: hidden → φ residual correction ---
+        if hidden_dim > 0:
+            self.phi_net = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim * 2),
+                nn.ELU(),
+                nn.Linear(hidden_dim * 2, self.cr),
+            )
+            # Init output layer near zero so G_t ≈ static G at start
+            nn.init.zeros_(self.phi_net[-1].weight)
+            nn.init.zeros_(self.phi_net[-1].bias)
+
+
+    # ---- helpers --------------------------------------------------------
+    def _cayley_orthogonal(self) -> torch.Tensor:
+        """Cayley map: skew A → orthonormal V = (I−A)(I+A)^{-1}."""
+        A = self.skew_raw - self.skew_raw.t()          # enforce skew-symmetry
+        I = torch.eye(self.rank, device=A.device, dtype=A.dtype)
+        return torch.linalg.solve(I + A, I - A)        # (R, R) orthonormal
+
+    # ---- forward --------------------------------------------------------
+    def forward(self, h: torch.Tensor = None) -> torch.Tensor:
+        """
+        Returns G_t: (R, R) symmetric positive-definite.
+
+        Parameters
+        ----------
+        h : (hidden_dim,) or None.
+            Pooled hidden-state features.  When provided (and hidden_dim > 0),
+            eigenvalues are modulated:  φ = softplus(log_phi + phi_net(h)).
+            When None, falls back to the static base eigenvalues.
+        """
+        # Compute eigenvalues — static base + optional hidden correction
+        if h is not None and self.hidden_dim > 0:
+            phi = F.softplus(self.log_phi + self.phi_net(h))    # (cr,) time-varying
+        else:
+            phi = F.softplus(self.log_phi)                      # (cr,) static fallback
+
+        I_R = torch.eye(self.rank, device=self.U.device, dtype=self.U.dtype)
+
+        correction = self.U @ torch.diag(phi) @ self.U.t()     # (R, R)
+
+        G_t = I_R + correction
+        G_t = G_t + self.sigma_min * I_R
+        return G_t
+
+    def get_orthogonality_loss(self) -> torch.Tensor:
+        """Not needed (Cayley guarantees V^T V = I), included for API compat."""
+        return torch.tensor(0.0, device=self.log_phi.device, dtype=self.log_phi.dtype)
+
+
+class CurvatureAwareGraphPrecision(nn.Module):
+    """
+    Curvature-aware graph precision for factor covariance G_t.
+
+    Implements Steps A → B → C of the proposal:
+
+        Step A  :  W_t = ½(Ã_t + Ã_t^T)        (symmetrised batch-mean adj)
+        Step B  :  κ_{ij,t} = BalancedForman(W_t)
+                   b_{ij,t} = softplus(τ · (z_{ij} + κ_0))  (distribution-aware)
+        Step C  :  W'_{ij,t} = W_{ij,t} · (1 + λ · b_{ij,t})
+                   L'_t  from  W'_t  (graph Laplacian)
+                   Q_t = α I + β L'_R + γ (L'_R)^k  (precision, PD)
+                   G_t = Q_t^{-1}                    (factor covariance)
+
+    The resulting G_t (R×R) replaces I_R in the Kronecker product
+    C_t ⊗ G_t that appears in the batch covariance Σ^{bat}_t.
+
+    **Revisions (addressing reviewer §1-4):**
+    - Self-loop removal before curvature (Rev 3 → negative κ on bridges)
+    - Distribution-aware bottleneck score (Rev 1 → b_ij ~ O(1))
+    - Multi-hop diffusion term γ(L'_R)^k in precision (Rev 2 → off-diagonal G_t)
+    - Fully differentiable forward (Rev 4 → no .item() detaching)
+
+    Parameters
+    ----------
+    rank          : Latent rank R (dimension of G_t).
+    num_nodes     : Number of spatial nodes N.
+    static_adj    : (N, N) static adjacency (used when no dynamic adj is available).
+    alpha         : Ridge regulariser in Q_t = αI + βL' (ensures PD).
+    beta          : Weight of the Laplacian in Q_t.
+    gamma         : Weight of multi-hop diffusion term (L'_R)^k.
+    diffusion_hops: Number of hops k for multi-hop term.
+    lam           : Strength of bottleneck reweighting  W'=W·(1+λ·b).
+    kappa_0       : Learnable bias in bottleneck indicator (shifts threshold).
+    tau           : Temperature of softplus bottleneck indicator.
+    sigma_min     : Jitter added to G_t diagonal for numerical safety.
+    """
+
+    def __init__(
+        self,
+        rank: int,
+        num_nodes: int,
+        static_adj: Optional[torch.Tensor] = None,
+        alpha: float = 0.01,
+        beta: float = 1.0,
+        gamma: float = 0.5,
+        diffusion_hops: int = 2,
+        lam: float = 1.0,
+        kappa_0: float = 0.0,
+        tau: float = 5.0,
+        sigma_min: float = 1e-4,
+    ):
+        super().__init__()
+        self.rank = rank
+        self.num_nodes = num_nodes
+        self.sigma_min = sigma_min
+        self.diffusion_hops = diffusion_hops
+
+        # Learnable precision hyper-parameters
+        self.log_alpha = nn.Parameter(torch.tensor(math.log(max(alpha, 1e-8))))
+        self.log_beta = nn.Parameter(torch.tensor(math.log(max(beta, 1e-8))))
+        self.log_gamma = nn.Parameter(torch.tensor(math.log(max(gamma, 1e-8))))
+        self.log_lam = nn.Parameter(torch.tensor(math.log(max(lam, 1e-8))))
+        self.kappa_0 = nn.Parameter(torch.tensor(float(kappa_0)))
+        self.log_tau = nn.Parameter(torch.tensor(math.log(max(tau, 1e-8))))
+
+        # Learnable projection  P : N → R   (init from Fiedler eigvecs)
+        if static_adj is not None:
+            L_graph = self._normalised_laplacian(static_adj)
+            _, eigvecs = torch.linalg.eigh(L_graph)
+            P_init = eigvecs[:, :rank].clone()
+        else:
+            L_graph = torch.eye(num_nodes)
+            P_init = torch.randn(num_nodes, rank) * (1.0 / math.sqrt(num_nodes))
+        self.projector = nn.Parameter(P_init)                   # (N, R)
+        self.register_buffer("L_graph_static", L_graph)
+
+        # Raw static adjacency (for curvature computation — includes self-loops)
+        if static_adj is not None:
+            self.register_buffer("static_adj_raw", static_adj.clone())
+        else:
+            self.register_buffer("static_adj_raw", torch.eye(num_nodes))
+
+        # Fallback static adj (symmetrised)
+        if static_adj is not None:
+            self.register_buffer("static_adj_sym", 0.5 * (static_adj + static_adj.T))
+        else:
+            self.register_buffer("static_adj_sym", torch.eye(num_nodes))
+
+    
+    # -----------------------------------------------------------------
+    # helpers
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _normalised_laplacian(adj: torch.Tensor) -> torch.Tensor:
+        W = 0.5 * (adj + adj.T)
+        deg = W.sum(-1)
+        d_inv_sqrt = torch.pow(deg.clamp(min=1e-8), -0.5)
+        d_inv_sqrt[torch.isinf(d_inv_sqrt)] = 0.0
+        N = W.shape[0]
+        D_isqrt = torch.diag(d_inv_sqrt)
+        return torch.eye(N, device=W.device, dtype=W.dtype) - D_isqrt @ W @ D_isqrt
+
+    def _project_to_R(self, L_full: torch.Tensor) -> torch.Tensor:
+        """L_R = P^T L P  (R×R), symmetrised."""
+        P = self.projector                                      # (N, R)
+        L_R = P.T @ L_full @ P                                 # (R, R)
+        return 0.5 * (L_R + L_R.T)
+
+    # -----------------------------------------------------------------
+    # forward
+    # -----------------------------------------------------------------
+    def forward(
+        self,
+        dynamic_adj: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Compute  G_t = Q_t^{-1}  with curvature-aware edge reweighting.
+
+        **Revision (Rev 2+4):**
+        - Precision now includes multi-hop diffusion:  Q_t = αI + βL'_R + γ(L'_R)^k
+        - All operations are differentiable (no .item() calls that detach).
+        - The mask is detached but curvature → b_ij → W' → L' → Q → G chain
+          preserves gradient flow through τ, κ₀, λ, α, β, γ, P.
+
+        Parameters
+        ----------
+        dynamic_adj : (B, N, N) or (N, N) or None.
+                      If batched, we average over B first (Choice 2 / Step A).
+
+        Returns
+        -------
+        G_t : (R, R)   positive-definite factor covariance.
+        """
+        # --- Step A: batch-mean symmetrised adjacency --------------------
+        if dynamic_adj is not None:
+            if dynamic_adj.dim() == 3:
+                W_t = dynamic_adj.mean(dim=0)                   # (N, N)
+            else:
+                W_t = dynamic_adj                               # (N, N)
+            W_t = 0.5 * (W_t + W_t.T)                          # symmetrise
+        else:
+            W_t = self.static_adj_sym                           # fallback
+
+        # --- Step B: curvature + bottleneck indicator --------------------
+        # Rev 4: keep tau, kappa_0 as tensors (no .item()) for gradient flow
+        tau = self.log_tau.exp()
+        kappa = _balanced_forman_curvature(W_t)                 # (N, N)
+        mask = (W_t - torch.diag(torch.diag(W_t)) > 0).float().detach()
+        b = _bottleneck_indicator(kappa, self.kappa_0, tau, mask)  # (N, N)
+
+        # --- Step C: reweight, Laplacian, precision, invert --------------
+        lam = self.log_lam.exp()
+        W_prime = W_t * (1.0 + lam * b)                        # (N, N)
+        W_prime = 0.5 * (W_prime + W_prime.T)                  # enforce symmetry
+        # Zero out self-loops for Laplacian computation
+        W_prime = W_prime - torch.diag(torch.diag(W_prime))
+
+        L_prime = laplacian_from_adj(W_prime)                   # (N, N)
+
+        # Project to latent space  L'_R = P^T L' P
+        L_R = self._project_to_R(L_prime)                      # (R, R)
+
+        alpha = self.log_alpha.exp()
+        beta = self.log_beta.exp()
+        gamma = self.log_gamma.exp()
+        eye_R = torch.eye(self.rank, device=L_R.device, dtype=L_R.dtype)
+
+        # Rev 2: Multi-hop diffusion term for off-diagonal coupling
+        L_R_power = L_R.clone()
+        for _ in range(self.diffusion_hops - 1):
+            L_R_power = L_R_power @ L_R
+
+        Q_t = alpha * eye_R + beta * L_R + gamma * L_R_power   # (R, R)  PD
+
+        # Enforce symmetry and PD
+        Q_t = 0.5 * (Q_t + Q_t.T)
+        Q_t = Q_t + self.sigma_min * eye_R                     # jitter
+
+        # G_t = Q_t^{-1}
+        G_t = torch.linalg.inv(Q_t).contiguous()               # (R, R)
+        G_t = 0.5 * (G_t + G_t.T)                              # enforce symmetry
+        G_t = G_t + self.sigma_min * eye_R                     # jitter
+
+        return G_t
 
 
 class SAGSAM(nn.Module):
@@ -493,6 +1202,552 @@ class TemporalCorrelationKernel(nn.Module):
             C = torch.einsum('bm,mij->bij', weights, self.base_kernels)  # (B, D, D)
         
         return C
+
+
+class DiffusionWithSourceCovariance(nn.Module):
+    """
+    Graph Laplacian Diffusion with Source Term for spatial error covariance.
+    
+    Models the spatial error covariance as arising from a heat diffusion process
+    on the graph with a source term:
+    
+        de/dτ = -α L e + s
+    
+    The stationary covariance (at equilibrium) is:
+        Σ_spatial = (2α L)^{-1} diag(s²)  (continuous-time steady state)
+    
+    For finite diffusion time τ, the covariance kernel is:
+        K(τ) = e^{-α τ L}  (diffusion component)
+    
+    And the full spatial covariance becomes:
+        G = e^{-α τ L} G_0 e^{-α τ L}^T + S  (diffusion + source floor)
+    
+    where:
+        - G_0 is the initial error covariance (learned or identity)
+        - S = diag(s²) with learnable per-node source strengths
+        - The source term S captures the irreducible error floor
+    
+    Projected to rank space: G_R = P^T G P  ∈ R^{R×R}
+    """
+    
+    def __init__(
+        self,
+        rank: int,
+        num_nodes: int,
+        static_adj: torch.Tensor = None,
+        alpha_init: float = 1.0,
+        tau_init: float = 1.0,
+        sigma_min: float = 1e-4,
+        learnable_projection: bool = True,
+        source_parameterization: str = "per_node",  # "per_node" | "scalar" | "per_rank"
+        hidden_proj_dim: int = 0,
+        ema_rate: float = 0.9,
+    ):
+        """
+        Args:
+            rank: R — dimension of factor space
+            num_nodes: N — number of graph nodes
+            static_adj: (N, N) static adjacency matrix
+            alpha_init: Initial diffusivity parameter
+            tau_init: Initial diffusion time
+            sigma_min: Minimum diagonal jitter for PD
+            learnable_projection: Whether P is learnable or fixed (top-R eigenvectors)
+            source_parameterization: How to parameterize the source term
+            hidden_proj_dim: Dimension of projected hidden features for state-aware
+                diffusion (Revision 1). Set > 0 to enable. When enabled, the
+                effective Laplacian blends the graph Laplacian with a hidden-state
+                similarity Laplacian: L_eff = L_graph + gamma * L_hidden(h).
+            ema_rate: EMA coefficient for updating node_repr_buffer (0.9 = slow decay).
+        """
+        super().__init__()
+        self.rank = rank
+        self.num_nodes = num_nodes
+        self.sigma_min = sigma_min
+        self.source_param = source_parameterization
+        
+        # --- Compute graph Laplacian ---
+        if static_adj is None:
+            static_adj = torch.eye(num_nodes)
+        
+        A_sym = 0.5 * (static_adj + static_adj.T)
+        A_sym.fill_diagonal_(0.0)
+        D_deg = A_sym.sum(dim=-1)
+        L = torch.diag(D_deg) - A_sym  # Unnormalized Laplacian
+        
+        # Normalized Laplacian for numerical stability
+        D_inv_sqrt = torch.diag(1.0 / (D_deg.sqrt() + 1e-8))
+        L_norm = torch.eye(num_nodes) - D_inv_sqrt @ A_sym @ D_inv_sqrt
+        
+        self.register_buffer('laplacian', L_norm)
+        
+        # --- Eigendecomposition of L for efficient matrix exponential ---
+        # L = U Λ U^T  =>  e^{-α τ L} = U e^{-α τ Λ} U^T
+        eigenvalues, eigenvectors = torch.linalg.eigh(L_norm)
+        eigenvalues = eigenvalues.clamp(min=0.0)  # Ensure non-negative
+        
+        self.register_buffer('L_eigenvalues', eigenvalues)   # (N,)
+        self.register_buffer('L_eigenvectors', eigenvectors)  # (N, N)
+        
+        # --- Projection matrix P: N → R ---
+        # Initialize with top-R eigenvectors (smallest non-zero eigenvalues)
+        # These capture the smoothest graph modes
+        # Skip the constant eigenvector (eigenvalue ≈ 0)
+        idx = torch.argsort(eigenvalues)
+        # Take eigenvectors corresponding to smallest non-trivial eigenvalues
+        start_idx = 1 if eigenvalues[idx[0]] < 1e-6 else 0
+        selected = idx[start_idx:start_idx + rank]
+        P_init = eigenvectors[:, selected]  # (N, R)
+        
+        if learnable_projection:
+            self.P = nn.Parameter(P_init.clone())
+        else:
+            self.register_buffer('P', P_init)
+        
+        # --- Learnable diffusion parameters ---
+        # α: diffusivity (controls how fast correlation decays with graph distance)
+        self.log_alpha = nn.Parameter(torch.tensor(math.log(alpha_init)))
+        
+        # τ: diffusion time (controls the effective range of spatial correlation)
+        self.log_tau = nn.Parameter(torch.tensor(math.log(tau_init)))
+        
+        # --- Source term s: irreducible error floor ---
+        if source_parameterization == "per_node":
+            # One source strength per node, projected to rank space
+            self.log_source = nn.Parameter(torch.zeros(num_nodes))
+        elif source_parameterization == "scalar":
+            # Single scalar source strength
+            self.log_source = nn.Parameter(torch.tensor(0.0))
+        elif source_parameterization == "per_rank":
+            # One source strength per rank dimension (after projection)
+            self.log_source = nn.Parameter(torch.zeros(rank))
+        else:
+            raise ValueError(f"Unknown source_parameterization: {source_parameterization}")
+
+        # --- Revision 1: State-Aware Diffusion ---
+        # Maintains a per-node EMA representation buffer updated each training batch.
+        # The effective Laplacian blends the graph Laplacian with a hidden-state
+        # similarity Laplacian, correcting for xLSTM's content-based (not graph-based)
+        # error correlation structure.
+        self.hidden_proj_dim = hidden_proj_dim
+        self.ema_rate = ema_rate
+        if hidden_proj_dim > 0:
+            self.register_buffer('node_repr_buffer', torch.zeros(num_nodes, hidden_proj_dim))
+            # log_gamma: weight for the hidden-state Laplacian term. Init near -1
+            # so gamma ≈ 0.37 — starts as a small correction, learns to grow.
+            self.log_gamma = nn.Parameter(torch.tensor(-1.0))
+            # log_sigma_hidden: RBF lengthscale for hidden-state similarity.
+            # Init = 0 → sigma = 1.0.  Larger sigma = smoother similarity kernel.
+            self.log_sigma_hidden = nn.Parameter(torch.tensor(0.0))
+
+    # -----------------------------------------------------------------
+    # Revision 1 helpers
+    # -----------------------------------------------------------------
+    @torch.no_grad()
+    def update_node_repr(self, features: torch.Tensor) -> None:
+        """
+        Update EMA node representation buffer.
+
+        Called once per training batch from BatchMGDDiffusion_Kernel.loss().
+        The buffer is *detached* from the gradient graph — it carries information
+        about xLSTM's hidden-state distribution without adding a gradient path
+        from the buffer into the model weights.
+
+        Args:
+            features: (num_nodes, hidden_proj_dim) projected hidden features
+                      pooled over the current batch.
+        """
+        self.node_repr_buffer.mul_(self.ema_rate).add_(
+            (1.0 - self.ema_rate) * features.to(self.node_repr_buffer.device)
+        )
+
+    def _compute_hidden_laplacian(self) -> torch.Tensor:
+        """
+        Build a symmetric-normalized Laplacian from node hidden representations.
+
+        Uses an RBF kernel on the EMA buffer to measure hidden-state similarity:
+            W_h[i,j] = exp(-||h_i - h_j||^2 / (2 sigma^2))
+            L_h = I - D^{-1/2} W_h D^{-1/2}   (eigenvalues in [0, 2])
+
+        The lengthscale sigma = exp(log_sigma_hidden) is learnable, allowing the
+        model to adapt the width of the similarity neighbourhood.
+
+        Gradients flow through log_sigma_hidden (via sigma → dist_sq scaling)
+        but NOT through node_repr_buffer (it is a detached buffer).
+        """
+        H = self.node_repr_buffer  # (N, d) — detached buffer
+        sigma = self.log_sigma_hidden.exp()
+        dist_sq = torch.cdist(H, H, p=2).pow(2)            # (N, N)
+        W_h = torch.exp(-dist_sq / (2.0 * sigma ** 2))     # RBF weights
+        # Remove self-loops so degree reflects only inter-node similarity
+        eye = torch.eye(self.num_nodes, device=W_h.device, dtype=W_h.dtype)
+        W_h = W_h * (1.0 - eye)
+        deg = W_h.sum(dim=-1).clamp(min=1e-8)
+        d_inv_sqrt = deg.pow(-0.5)
+        # Symmetric normalized Laplacian: L_h = I - D^{-1/2} W_h D^{-1/2}
+        L_h = eye - (d_inv_sqrt.unsqueeze(1) * W_h * d_inv_sqrt.unsqueeze(0))
+        return L_h
+
+    def _get_diffusion_kernel_full(self) -> torch.Tensor:
+        """
+        Compute the full (N×N) diffusion kernel e^{-α τ L_eff}.
+
+        **Revision 1 (State-Aware Diffusion):**
+        When hidden_proj_dim > 0 and the node_repr_buffer has been populated,
+        the effective Laplacian is:
+
+            L_eff = L_graph + gamma * L_hidden(h)
+
+        where L_hidden is the symmetric-normalized Laplacian derived from
+        pairwise hidden-state similarities (RBF kernel).  This corrects for
+        xLSTM's content-based error correlation structure: nodes with similar
+        hidden states get stronger diffusive coupling regardless of graph distance.
+
+        Gradient flow: alpha, tau, gamma, log_sigma_hidden all receive gradients.
+        node_repr_buffer is detached (EMA update, no backprop through it).
+
+        Returns:
+            (N, N) diffusion kernel matrix
+        """
+        alpha = self.log_alpha.exp()
+        tau = self.log_tau.exp()
+
+        # --- Revision 1: blend graph + hidden-state Laplacian ---
+        buffer_active = (
+            self.hidden_proj_dim > 0
+            and self.node_repr_buffer.abs().max().item() > 1e-6
+        )
+        if buffer_active:
+            gamma = self.log_gamma.exp()
+            L_h = self._compute_hidden_laplacian()          # (N, N), grad through sigma
+            L_eff = self.laplacian + gamma * L_h            # grad through gamma
+            L_eff = 0.5 * (L_eff + L_eff.T)               # enforce symmetry
+            # Use matrix_exp instead of eigh + manual exponentiation.
+            # eigh backward involves 1/(λ_i − λ_j) terms that blow up for the
+            # near-degenerate eigenvalues typical of road-network Laplacians,
+            # corrupting gradients after a few steps.  torch.linalg.matrix_exp
+            # uses Padé approximants whose backward is numerically stable.
+            K = torch.linalg.matrix_exp(-alpha * tau * L_eff)
+        else:
+            # Fall back to pre-stored graph Laplacian eigenbasis (no hidden info yet)
+            exp_eigenvalues = torch.exp(-alpha * tau * self.L_eigenvalues)
+            K = self.L_eigenvectors @ torch.diag(exp_eigenvalues) @ self.L_eigenvectors.T
+        return K
+    
+    def _get_source_covariance_full(self) -> torch.Tensor:
+        """
+        Compute the full (N×N) source covariance S = diag(s²).
+        
+        This represents the irreducible error floor — the spatial correlation
+        that persists even at large graph distances.
+        
+        Returns:
+            (N, N) source covariance (diagonal)
+        """
+        if self.source_param == "per_node":
+            s_squared = F.softplus(self.log_source)  # (N,)
+            return torch.diag(s_squared)
+        elif self.source_param == "scalar":
+            s_squared = F.softplus(self.log_source)
+            return s_squared * torch.eye(self.num_nodes, device=self.log_source.device)
+        else:
+            return None  # Handled in rank space directly
+    
+    def _project_to_rank(self, M_full: torch.Tensor) -> torch.Tensor:
+        """
+        Project an (N, N) matrix to (R, R) via P^T M P.
+        
+        If P is learnable, we orthonormalize via QR to maintain well-conditioned
+        projection.
+        """
+        if isinstance(self.P, nn.Parameter):
+            # Orthonormalize P via QR decomposition
+            P_orth, _ = torch.linalg.qr(self.P)
+        else:
+            P_orth = self.P
+        
+        return P_orth.T @ M_full @ P_orth  # (R, R)
+    
+    def forward(self, hidden: torch.Tensor = None) -> torch.Tensor:
+        """
+        Compute the (R, R) factor covariance G_t.
+        
+        G_full = K @ G_0 @ K^T + S
+        
+        where K = e^{-α τ L} is the diffusion kernel and S is the source floor.
+        Then G_t = P^T G_full P  (projected to rank space).
+        
+        For the initial covariance G_0, we use the identity (error starts
+        independent, then diffusion induces correlation).
+        
+        Args:
+            hidden: Optional hidden state for time-varying α, τ (not used in 
+                    static version)
+        
+        Returns:
+            G_t: (R, R) positive-definite factor covariance matrix
+        """
+        # Diffusion kernel in full node space
+        K = self._get_diffusion_kernel_full()  # (N, N)
+        
+        # G_full = K @ I @ K^T + S = K @ K^T + S
+        # This is the covariance after diffusing independent errors + source
+        G_full = K @ K.T  # (N, N) — diffused component
+        
+        # Add source term (the error floor)
+        S_full = self._get_source_covariance_full()
+        if S_full is not None:
+            G_full = G_full + S_full
+        
+        # Project to rank space
+        G_t = self._project_to_rank(G_full)  # (R, R)
+        
+        # Handle per_rank source (added directly in rank space)
+        if self.source_param == "per_rank":
+            s_squared = F.softplus(self.log_source)  # (R,)
+            G_t = G_t + torch.diag(s_squared)
+        
+        # Ensure PD with minimum jitter
+        G_t = G_t + self.sigma_min * torch.eye(self.rank, device=G_t.device)
+        
+        # Symmetrize for numerical safety
+        G_t = 0.5 * (G_t + G_t.T)
+        
+        return G_t
+    
+    def get_diffusion_parameters(self) -> Dict[str, float]:
+        """Return interpretable diffusion parameters for logging."""
+        params = {
+            'alpha': self.log_alpha.exp().item(),
+            'tau': self.log_tau.exp().item(),
+            'alpha_tau': (self.log_alpha.exp() * self.log_tau.exp()).item(),
+            'source_mean': F.softplus(self.log_source).mean().item(),
+        }
+        if self.hidden_proj_dim > 0:
+            params['gamma'] = self.log_gamma.exp().item()
+            params['sigma_hidden'] = self.log_sigma_hidden.exp().item()
+            params['buffer_norm'] = self.node_repr_buffer.norm().item()
+        return params
+
+
+class GARCHDiffusionCovariance(DiffusionWithSourceCovariance):
+    """
+    GARCH(1,1)-inspired dynamic spatial factor covariance with graph diffusion.
+
+    The factor covariance G_t follows a GARCH(1,1) recursion on top of the
+    graph Laplacian diffusion covariance:
+
+        G_t = ω · G_∞ + α · Shock_t + β · G_{t-1}
+
+    where [ω, α, β] = softmax([raw_ω, raw_α, raw_β])  (stationarity by construction)
+
+    Components:
+        G_∞    = P^T (K K^T + S) P   — long-run diffusion covariance (parent class)
+        Shock_t = P^T diag(ε̄²_t) P  — ARCH term: projected EMA of squared residuals
+        G_{t-1}                       — GARCH persistence: lagged factor covariance
+
+    The stationarity condition α + β < 1 is automatically satisfied because
+    [ω, α, β] sum to 1 (softmax) and ω > 0.  The unconditional (long-run) mean is:
+
+        E[G_t] = G_∞   (since E[Shock_t] ≈ G_∞ at stationarity)
+
+    Physical interpretation:
+        - α controls how fast the model reacts to new spatial error patterns
+          (high α → quick adaptation to volatility spikes).
+        - β controls persistence: how long a volatility burst lingers
+          (high β → slow decay, long memory).
+        - ω controls mean-reversion strength back to the graph diffusion prior.
+
+    Buffers (no-grad, updated once per batch after forward()):
+        resid_sq_buffer : (N,)   EMA of per-node squared residuals
+        G_prev_buffer   : (R, R) last observed factor covariance matrix
+    """
+
+    def __init__(
+        self,
+        rank: int,
+        num_nodes: int,
+        static_adj: torch.Tensor = None,
+        alpha_init: float = 1.0,
+        tau_init: float = 1.0,
+        sigma_min: float = 1e-4,
+        learnable_projection: bool = True,
+        source_parameterization: str = "per_node",
+        hidden_proj_dim: int = 0,
+        ema_rate: float = 0.9,
+        # --- GARCH-specific ---
+        garch_alpha_init: float = 0.1,
+        garch_beta_init: float = 0.8,
+        ema_resid_rate: float = 0.9,
+    ):
+        """
+        Args:
+            garch_alpha_init: Initial ARCH coefficient (reaction to past shocks).
+            garch_beta_init:  Initial GARCH coefficient (volatility persistence).
+            ema_resid_rate:   EMA decay rate for the squared-residual buffer.
+                              Close to 1 → slow-moving shock; close to 0 → reactive.
+
+        All other arguments are forwarded to DiffusionWithSourceCovariance.
+        """
+        super().__init__(
+            rank=rank,
+            num_nodes=num_nodes,
+            static_adj=static_adj,
+            alpha_init=alpha_init,
+            tau_init=tau_init,
+            sigma_min=sigma_min,
+            learnable_projection=learnable_projection,
+            source_parameterization=source_parameterization,
+            hidden_proj_dim=hidden_proj_dim,
+            ema_rate=ema_rate,
+        )
+        self.ema_resid_rate = ema_resid_rate
+
+        # GARCH weights as a 3-way softmax to guarantee ω + α + β = 1.
+        # Initialize raw logits so that softmax ≈ [1-α-β, α, β].
+        omega_init = max(1.0 - garch_alpha_init - garch_beta_init, 1e-4)
+        raw_init = torch.tensor(
+            [math.log(omega_init),
+             math.log(garch_alpha_init + 1e-8),
+             math.log(garch_beta_init + 1e-8)]
+        )
+        self.garch_raw = nn.Parameter(raw_init)  # (3,) learnable
+
+        # Buffers: no gradient, updated via update_garch_state()
+        # resid_sq_buffer: EMA of per-node squared residuals (initialised to 1)
+        self.register_buffer('resid_sq_buffer', torch.ones(num_nodes))
+        # G_prev_buffer: lagged factor covariance (initialised to identity)
+        self.register_buffer('G_prev_buffer', torch.eye(rank))
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _get_garch_weights(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return (ω, α, β) via 3-way softmax — always sum to 1, all > 0."""
+        weights = F.softmax(self.garch_raw, dim=0)
+        return weights[0], weights[1], weights[2]
+
+    def _compute_shock_R(self) -> torch.Tensor:
+        """
+        Compute ARCH shock in rank space: Shock = P^T diag(ε̄²) P ∈ R^{R×R}.
+
+        Uses the EMA squared-residual buffer (detached from grad graph).
+        Equivalent to projecting the per-node sample variance into factor space.
+        """
+        sq_resid = self.resid_sq_buffer.clamp(min=0.0)  # (N,) non-negative
+        if isinstance(self.P, nn.Parameter):
+            P_orth, _ = torch.linalg.qr(self.P)
+        else:
+            P_orth = self.P
+        # P_orth^T diag(sq_resid) P_orth = (P_orth * sq_resid[:, None]).T @ P_orth
+        shock_R = (P_orth * sq_resid.unsqueeze(1)).T @ P_orth  # (R, R)
+        return shock_R
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(self, hidden: torch.Tensor = None) -> torch.Tensor:
+        """
+        Compute the (R, R) factor covariance G_t via GARCH(1,1) recursion.
+
+        Step-by-step:
+          1.  G_∞  ← parent diffusion covariance  (long-run spatial structure)
+          2.  Shock ← P^T diag(resid_sq_buffer) P  (ARCH shock from EMA residuals)
+          3.  G_t  = ω·G_∞  +  α·Shock  +  β·G_{t-1}
+          4.  Clamp to PD and symmetrize.
+
+        The GARCH buffers are *not* updated here; call update_garch_state()
+        after the loss backward to advance the state for the next batch.
+
+        Returns:
+            G_t: (R, R) positive-definite factor covariance.
+        """
+        # --- Long-run diffusion covariance G_∞ ---
+        K = self._get_diffusion_kernel_full()       # (N, N)
+        G_full_inf = K @ K.T                        # diffused component
+        S_full = self._get_source_covariance_full()
+        if S_full is not None:
+            G_full_inf = G_full_inf + S_full
+        G_inf = self._project_to_rank(G_full_inf)   # (R, R)
+        if self.source_param == "per_rank":
+            G_inf = G_inf + torch.diag(F.softplus(self.log_source))
+
+        # --- GARCH coefficients ---
+        omega_w, alpha_w, beta_w = self._get_garch_weights()
+
+        # --- ARCH shock: projected squared residuals ---
+        shock_R = self._compute_shock_R()           # (R, R), from detached buffer
+
+        # --- GARCH persistence: lagged covariance ---
+        # .clone() gives G_prev its own storage so the subsequent in-place
+        # copy_() inside update_garch_state() doesn't bump the version counter
+        # of a tensor that is already in the backward graph.
+        G_prev = self.G_prev_buffer.clone()         # (R, R)
+
+        # --- GARCH(1,1) recursion ---
+        G_t = omega_w * G_inf + alpha_w * shock_R + beta_w * G_prev
+
+        # Ensure PD and symmetry
+        G_t = G_t + self.sigma_min * torch.eye(self.rank, device=G_t.device, dtype=G_t.dtype)
+        G_t = 0.5 * (G_t + G_t.T)
+
+        # Cache for state update (detached — buffer update must not affect gradients)
+        self._last_G_t = G_t.detach()
+
+        return G_t
+
+    # ------------------------------------------------------------------
+    # State update (called once per batch, outside autograd)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def update_garch_state(self, sq_resid_per_node: torch.Tensor) -> None:
+        """
+        Advance the GARCH state after each training batch.
+
+        1. EMA-update resid_sq_buffer with the batch's per-node squared residuals.
+        2. Copy _last_G_t → G_prev_buffer for use in the next forward().
+
+        Args:
+            sq_resid_per_node: (N,) or (batch_size,) squared residuals averaged
+                               over the decoder horizon.  Should be detached.
+
+        Note on mini-batch mode: when the dataloader batch size is smaller than
+        num_nodes (e.g. batch_size=20, num_nodes=195), the incoming tensor has
+        fewer elements than resid_sq_buffer.  In that case the batch-mean is
+        broadcast to all nodes — spatial resolution is lost but temporal GARCH
+        dynamics (volatility clustering and persistence) are preserved intact.
+        Full spatial resolution is recovered when batch_size == num_nodes.
+        """
+        sq = sq_resid_per_node.to(self.resid_sq_buffer.device)
+        if sq.shape[0] != self.num_nodes:
+            # Mini-batch: broadcast mean residual energy to all nodes
+            sq = sq.mean().expand(self.num_nodes)
+        # Update EMA of squared residuals
+        self.resid_sq_buffer.mul_(self.ema_resid_rate).add_(
+            (1.0 - self.ema_resid_rate) * sq
+        )
+        # Advance lagged covariance
+        if hasattr(self, '_last_G_t'):
+            self.G_prev_buffer.copy_(self._last_G_t.to(self.G_prev_buffer.device))
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
+    def get_diffusion_parameters(self) -> Dict[str, float]:
+        params = super().get_diffusion_parameters()
+        omega_w, alpha_w, beta_w = self._get_garch_weights()
+        params.update({
+            'garch_omega':           omega_w.item(),
+            'garch_alpha':           alpha_w.item(),
+            'garch_beta':            beta_w.item(),
+            'garch_persistence':     (alpha_w + beta_w).item(),
+            'garch_resid_sq_mean':   self.resid_sq_buffer.mean().item(),
+            'garch_G_prev_trace':    self.G_prev_buffer.trace().item(),
+        })
+        return params
 
 
 class GraphFactorKernelMixture(nn.Module):

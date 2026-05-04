@@ -92,3 +92,49 @@ gpt:
     vehicle_trips_without_missing:
       H: 40
       lr: 1e-03 
+xLSTM:
+  rnn_layers: 2
+  n_heads: 2
+  dataset:
+    exchange_rate_nips:
+      H: 40
+      lr: 1e-03 
+    solar_nips:
+      H: 10
+      lr: 1e-03 
+    electricity_nips:
+      H: 40
+      lr: 1e-02 
+    traffic_nips:
+      H: 20
+      lr: 1e-03 
+    taxi_30min:
+      H: 10
+      lr: 1e-02 
+    wiki2000_nips:
+      H: 40
+      lr: 1e-03 
+    m4_hourly:
+      H: 20
+      lr: 1e-02 
+    m1_quarterly:
+      H: 40
+      lr: 1e-02 
+    pems03_flow:
+      H: 10
+      lr: 1e-02 
+    brussels:
+      H: 10
+      lr: 1e-02 
+    uber_tlc_hourly:
+      H: 40
+      lr: 1e-02 
+    tourism_quarterly:
+      H: 20
+      lr: 1e-02 
+    m3_monthly:
+      H: 20
+      lr: 1e-02 
+    vehicle_trips_without_missing:
+      H: 40
+      lr: 1e-03 

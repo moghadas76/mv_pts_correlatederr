@@ -26,7 +26,9 @@ from pytorch_forecasting.metrics import (
     MultivariateDistributionLoss,
     NormalDistributionLoss,
 )
-
+from _recurrent import SeriesDecomposition, mLSTMNetwork, sLSTMNetwork
+from pytorch_forecasting.metrics import SMAPE, Metric
+from pytorch_forecasting.models.base_model import AutoRegressiveBaseModel
 
 from matplotlib import pyplot as plt
 
@@ -668,6 +670,518 @@ class ARTransformer(AutoRegressiveBaseModelWithCovariates):
             figs.append(fig)
 
         # return multiple of target is a list, otherwise return single figure
+        if isinstance(x["encoder_target"], (tuple, list)):
+            return figs
+        else:
+            return fig
+
+
+
+class xLSTMBackbone(AutoRegressiveBaseModelWithCovariates):
+    """
+    xLSTM-based backbone for probabilistic time series forecasting with covariates.
+
+    Uses either sLSTM (stabilized scalar-memory) or mLSTM (matrix-memory) from the
+    xLSTM family, combined with series decomposition (trend/seasonal) from Autoformer.
+    Inherits the covariate handling and autoregressive decoding machinery from
+    AutoRegressiveBaseModelWithCovariates.
+
+    Based on: https://arxiv.org/pdf/2407.10240
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 10,
+        rnn_layers: int = 1,
+        dropout: float = 0.1,
+        xlstm_type: str = "slstm",
+        decomposition_kernel: int = 25,
+        static_categoricals: List[str] = [],
+        static_reals: List[str] = [],
+        time_varying_categoricals_encoder: List[str] = [],
+        time_varying_categoricals_decoder: List[str] = [],
+        categorical_groups: Dict[str, List[str]] = {},
+        time_varying_reals_encoder: List[str] = [],
+        time_varying_reals_decoder: List[str] = [],
+        embedding_sizes: Dict[str, Tuple[int, int]] = {},
+        embedding_paddings: List[str] = [],
+        embedding_labels: Dict[str, np.ndarray] = {},
+        x_reals: List[str] = [],
+        x_categoricals: List[str] = [],
+        n_validation_samples: int = None,
+        n_plotting_samples: int = None,
+        target: Union[str, List[str]] = None,
+        target_lags: Dict[str, List[int]] = {},
+        loss: DistributionLoss = None,
+        logging_metrics: nn.ModuleList = None,
+        **kwargs,
+    ):
+        """
+        Args:
+            hidden_size: Hidden dimension for xLSTM and projections.
+            rnn_layers: Number of stacked xLSTM layers.
+            dropout: Dropout rate within the xLSTM layers.
+            xlstm_type: ``"slstm"`` for stabilized LSTM or ``"mlstm"`` for matrix-memory LSTM.
+            decomposition_kernel: Kernel size for the moving-average series decomposition.
+        """
+        if loss is None:
+            loss = NormalDistributionLoss()
+        if logging_metrics is None:
+            logging_metrics = nn.ModuleList([SMAPE(), MAE(), RMSE(), MAPE(), MASE()])
+        if n_plotting_samples is None:
+            if n_validation_samples is None:
+                n_plotting_samples = n_validation_samples
+            else:
+                n_plotting_samples = 100
+        self.save_hyperparameters()
+        super().__init__(loss=loss, logging_metrics=logging_metrics, **kwargs)
+
+        # --- categorical embeddings ---
+        self.embeddings = MultiEmbedding(
+            embedding_sizes=embedding_sizes,
+            embedding_paddings=embedding_paddings,
+            categorical_groups=categorical_groups,
+            x_categoricals=x_categoricals,
+        )
+
+        # --- validation checks (same as ARTransformer) ---
+        lagged_target_names = [l for lags in target_lags.values() for l in lags]
+        assert set(self.encoder_variables) - set(to_list(target)) - set(lagged_target_names) == set(
+            self.decoder_variables
+        ) - set(lagged_target_names), "Encoder and decoder variables have to be the same apart from target variable"
+        for targeti in to_list(target):
+            assert (
+                targeti in time_varying_reals_encoder
+            ), f"target {targeti} has to be real"
+        assert (isinstance(target, str) and isinstance(loss, DistributionLoss)) or (
+            isinstance(target, (list, tuple)) and isinstance(loss, MultiLoss) and len(loss) == len(target)
+        ), "number of targets should be equivalent to number of loss metrics"
+
+        # --- input sizes ---
+        self.cont_size = len(self.reals)
+        self.cat_size = sum(self.embeddings.output_size.values())
+
+        # --- xLSTM-specific components ---
+        if xlstm_type not in ["slstm", "mlstm"]:
+            raise ValueError("xlstm_type must be either 'slstm' or 'mlstm'")
+
+        self.decomposition = SeriesDecomposition(decomposition_kernel)
+        self.input_linear = nn.Linear(self.cont_size * 2 + self.cat_size, hidden_size)
+        self.batch_norm = nn.BatchNorm1d(hidden_size)
+
+        if xlstm_type == "mlstm":
+            self.lstm = mLSTMNetwork(
+                input_size=hidden_size,
+                hidden_size=hidden_size,
+                num_layers=rnn_layers,
+                output_size=hidden_size,
+                dropout=dropout,
+            )
+        else:  # slstm
+            self.lstm = sLSTMNetwork(
+                input_size=hidden_size,
+                hidden_size=hidden_size,
+                num_layers=rnn_layers,
+                output_size=hidden_size,
+                dropout=dropout,
+            )
+
+        # --- distribution projector ---
+        if isinstance(target, str):  # single target
+            self.distribution_projector = nn.Linear(self.hparams.hidden_size, len(self.loss.distribution_arguments))
+        else:  # multi target
+            self.distribution_projector = nn.ModuleList(
+                [nn.Linear(self.hparams.hidden_size, len(args)) for args in self.loss.distribution_arguments]
+            )
+
+    @classmethod
+    def from_dataset(
+        cls,
+        dataset: TimeSeriesDataSet,
+        allowed_encoder_known_variable_names: List[str] = None,
+        **kwargs,
+    ):
+        """
+        Create model from dataset.
+
+        Args:
+            dataset: timeseries dataset
+            allowed_encoder_known_variable_names: List of known variables that are allowed in encoder, defaults to all
+            **kwargs: additional arguments such as hyperparameters for model (see ``__init__()``)
+
+        Returns:
+            xLSTMBackbone network
+        """
+        new_kwargs = {}
+        if dataset.multi_target:
+            new_kwargs.setdefault("loss", MultiLoss([NormalDistributionLoss()] * len(dataset.target_names)))
+        new_kwargs.update(kwargs)
+        assert not isinstance(dataset.target_normalizer, NaNLabelEncoder) and (
+            not isinstance(dataset.target_normalizer, MultiNormalizer)
+            or all([not isinstance(normalizer, NaNLabelEncoder) for normalizer in dataset.target_normalizer])
+        ), "target(s) should be continuous - categorical targets are not supported"
+        if isinstance(new_kwargs.get("loss", None), MultivariateDistributionLoss):
+            assert (
+                dataset.min_prediction_length == dataset.max_prediction_length
+            ), "Multivariate models require constant prediction lenghts"
+        return super().from_dataset(
+            dataset, allowed_encoder_known_variable_names=allowed_encoder_known_variable_names, **new_kwargs
+        )
+
+    def construct_input_vector(
+        self, x_cat: torch.Tensor, x_cont: torch.Tensor, one_off_target: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Create input vector into xLSTM network.
+
+        Args:
+            one_off_target: tensor to insert into first position of target. If None (default), remove first time step.
+        """
+        if len(self.categoricals) > 0:
+            embeddings = self.embeddings(x_cat)
+            flat_embeddings = torch.cat([emb for emb in embeddings.values()], dim=-1)
+            input_vector = flat_embeddings
+
+        if len(self.reals) > 0:
+            input_vector = x_cont.clone()
+
+        if len(self.reals) > 0 and len(self.categoricals) > 0:
+            input_vector = torch.cat([x_cont, flat_embeddings], dim=-1)
+
+        # shift target by one
+        input_vector[..., self.target_positions] = torch.roll(
+            input_vector[..., self.target_positions], shifts=1, dims=1
+        )
+
+        if one_off_target is not None:  # set first target input (which is rolled over)
+            input_vector[:, 0, self.target_positions] = one_off_target
+        else:
+            input_vector = input_vector[:, 1:]
+        return input_vector
+
+    def add_input_vector(self, input_vector: torch.Tensor) -> torch.Tensor:
+        """Project input to hidden size using series decomposition + linear + batch norm."""
+        cont = input_vector[..., :self.cont_size]
+
+        # decompose continuous features into trend and seasonal
+        seasonal, trend = self.decomposition(cont)
+        decomposed = torch.cat([trend, seasonal], dim=-1)  # (B, T, cont_size*2)
+
+        if self.cat_size > 0:
+            cat_features = input_vector[..., self.cont_size:]
+            combined = torch.cat([decomposed, cat_features], dim=-1)
+        else:
+            combined = decomposed
+
+        x = self.input_linear(combined)  # (B, T, hidden_size)
+        x = x.transpose(1, 2)
+        x = self.batch_norm(x)
+        x = x.transpose(1, 2)
+        return x
+
+    def _run_lstm(self, x: torch.Tensor, hidden_states=None):
+        """
+        Run xLSTM layer on batch-first input, return batch-first per-timestep output.
+
+        Args:
+            x: (batch, seq, hidden_size)
+            hidden_states: optional initial hidden states
+
+        Returns:
+            output: (batch, seq, hidden_size)
+            hidden_states: final hidden states
+        """
+        batch_size = x.shape[0]
+        if hidden_states is None:
+            hidden_states = self.lstm.init_hidden(batch_size, device=x.device)
+
+        x_sf = x.transpose(0, 1)  # (seq, batch, hidden)
+
+        if self.hparams.xlstm_type == "mlstm":
+            output, hidden_states = self.lstm.mlstm_layer(x_sf, *hidden_states)
+        else:
+            output, hidden_states = self.lstm.slstm_layer(x_sf, *hidden_states)
+
+        # output shape: (seq, batch, hidden) for both variants
+        output = output.transpose(0, 1)  # (batch, seq, hidden)
+        return output, hidden_states
+
+    def encode(self, x: Dict[str, torch.Tensor]):
+        """
+        Encode encoder sequence through xLSTM.
+
+        Returns:
+            encoder_output: (B, P-1, hidden_size)
+            hidden_states: final xLSTM hidden states
+        """
+        assert x["encoder_lengths"].min() > 0
+        input_vector = self.construct_input_vector(x["encoder_cat"], x["encoder_cont"])
+        src = self.add_input_vector(input_vector)
+        encoder_output, hidden_states = self._run_lstm(src)
+        return encoder_output, hidden_states
+
+    def decode_all(
+        self,
+        input_vector: torch.Tensor,
+        decoder_length: int,
+    ):
+        """
+        Process full input through xLSTM, return distribution parameters for decoder portion.
+
+        Args:
+            input_vector: (B, P+Q-1, cont_size+cat_size)
+            decoder_length: number of decoder time steps
+
+        Returns:
+            output: distribution parameters for decoder portion
+        """
+        src = self.add_input_vector(input_vector)
+        output, _ = self._run_lstm(src)
+        decoder_output = output[:, -decoder_length:]
+        if isinstance(self.hparams.target, str):
+            output = self.distribution_projector(decoder_output)
+        else:
+            output = [projector(decoder_output) for projector in self.distribution_projector]
+        return output
+
+    def decode_autoregressive(
+        self,
+        decode_one: Callable,
+        first_target: Union[List[torch.Tensor], torch.Tensor],
+        target_scale: Union[List[torch.Tensor], torch.Tensor],
+        n_decoder_steps: int,
+        n_samples: int = 1,
+        **kwargs,
+    ) -> Union[List[torch.Tensor], torch.Tensor]:
+        """Autoregressive decoding, same pattern as ARTransformer."""
+        output = []
+        normalized_output = [first_target]
+        for idx in range(n_decoder_steps):
+            current_target = decode_one(
+                idx, lagged_targets=normalized_output, decoder_length=n_decoder_steps, **kwargs
+            )
+            prediction, current_target = self.output_to_prediction(
+                current_target, target_scale=target_scale, n_samples=n_samples
+            )
+            normalized_output.append(current_target)
+            output.append(prediction)
+        if isinstance(self.hparams.target, str):
+            output = torch.stack(output, dim=1)
+        else:
+            output = [torch.stack([out[idx] for out in output], dim=1) for idx in range(len(self.target_positions))]
+        return output
+
+    def decode(
+        self,
+        input_vector: torch.Tensor,
+        decoder_length: int,
+        target_scale: torch.Tensor,
+        n_samples: int = None,
+    ) -> torch.Tensor:
+        """
+        Decode into prediction. If n_samples is given, decode by sampling new
+        targets from past predictions iteratively (autoregressive).
+        """
+        if n_samples is None:
+            output = self.decode_all(input_vector, decoder_length)
+            output = self.transform_output(output, target_scale=target_scale)
+        else:
+            target_pos = self.target_positions
+            lagged_target_positions = self.lagged_target_positions
+            input_vector = input_vector.repeat_interleave(n_samples, 0)
+            target_scale = apply_to_list(target_scale, lambda x: x.repeat_interleave(n_samples, 0))
+
+            def decode_one(idx, lagged_targets, decoder_length):
+                x = input_vector[:, :decoder_length + idx]
+                x[:, decoder_length - 1:, target_pos] = torch.stack(lagged_targets, dim=1)
+                for lag, lag_positions in lagged_target_positions.items():
+                    if idx > lag:
+                        x[:, 0, lag_positions] = lagged_targets[-lag]
+                prediction = self.decode_all(x, len(lagged_targets))
+                prediction = apply_to_list(prediction, lambda x: x[:, -1])
+                return prediction
+
+            output = self.decode_autoregressive(
+                decode_one,
+                first_target=input_vector[:, -decoder_length, target_pos],
+                target_scale=target_scale,
+                n_decoder_steps=decoder_length,
+                n_samples=n_samples,
+            )
+            output = apply_to_list(output, lambda x: x.reshape(-1, n_samples, decoder_length).permute(0, 2, 1))
+        return output
+
+    def forward(self, x: Dict[str, torch.Tensor], n_samples: int = None) -> Dict[str, torch.Tensor]:
+        """Forward network."""
+        x_cat = torch.cat([x["encoder_cat"], x["decoder_cat"]], dim=1)
+        x_cont = torch.cat([x["encoder_cont"], x["decoder_cont"]], dim=1)
+
+        input_vector = self.construct_input_vector(x_cat, x_cont)
+        decoder_length = int(x["decoder_lengths"].max())
+
+        if self.training:
+            assert n_samples is None, "cannot sample from decoder when training"
+        output = self.decode(
+            input_vector,
+            decoder_length=decoder_length,
+            target_scale=x["target_scale"],
+            n_samples=n_samples,
+        )
+        return self.to_network_output(prediction=output)
+
+    def create_log(self, x, y, out, batch_idx):
+        n_samples = [self.hparams.n_validation_samples, self.hparams.n_plotting_samples][self.training]
+        log = super().create_log(
+            x,
+            y,
+            out,
+            batch_idx,
+            prediction_kwargs=dict(n_samples=n_samples),
+            quantiles_kwargs=dict(n_samples=n_samples),
+        )
+        return log
+
+    def predict(
+        self,
+        data: Union[DataLoader, pd.DataFrame, TimeSeriesDataSet],
+        mode: Union[str, Tuple[str, str]] = "prediction",
+        return_index: bool = False,
+        return_decoder_lengths: bool = False,
+        batch_size: int = 64,
+        num_workers: int = 0,
+        fast_dev_run: bool = False,
+        show_progress_bar: bool = False,
+        return_x: bool = False,
+        mode_kwargs: Dict[str, Any] = None,
+        n_samples: int = 100,
+    ):
+        """predict dataloader"""
+        if isinstance(mode, str):
+            if mode in ["prediction", "quantiles"]:
+                if mode_kwargs is None:
+                    mode_kwargs = dict(use_metric=False)
+                else:
+                    mode_kwargs = deepcopy(mode_kwargs)
+                    mode_kwargs["use_metric"] = False
+            elif mode == "samples":
+                mode = ("raw", "prediction")
+        return super().predict(
+            data=data,
+            mode=mode,
+            return_decoder_lengths=return_decoder_lengths,
+            return_index=return_index,
+            n_samples=n_samples,
+            return_x=return_x,
+            show_progress_bar=show_progress_bar,
+            fast_dev_run=fast_dev_run,
+            num_workers=num_workers,
+            batch_size=batch_size,
+            mode_kwargs=mode_kwargs,
+        )
+
+    def plot_prediction(
+        self,
+        x: Dict[str, torch.Tensor],
+        out: Dict[str, torch.Tensor],
+        idx: int = 0,
+        add_loss_to_title: Union[Metric, torch.Tensor, bool] = False,
+        show_future_observed: bool = True,
+        ax=None,
+        quantiles_kwargs: Dict[str, Any] = {},
+        prediction_kwargs: Dict[str, Any] = {},
+    ) -> plt.Figure:
+        """Plot prediction of prediction vs actuals."""
+        if isinstance(self.loss, DistributionLoss):
+            prediction_kwargs.setdefault("use_metric", False)
+            quantiles_kwargs.setdefault("use_metric", False)
+
+        encoder_targets = to_list(x["encoder_target"])
+        decoder_targets = to_list(x["decoder_target"])
+
+        y_raws = to_list(out["prediction"])
+        y_hats = to_list(self.to_prediction(out, **prediction_kwargs))
+        y_quantiles = to_list(self.to_quantiles(out, **quantiles_kwargs))
+
+        figs = []
+        for y_raw, y_hat, y_quantile, encoder_target, decoder_target in zip(
+            y_raws, y_hats, y_quantiles, encoder_targets, decoder_targets
+        ):
+            y_all = torch.cat([encoder_target[idx], decoder_target[idx]])
+            max_encoder_length = x["encoder_lengths"].max()
+            y = torch.cat(
+                (
+                    y_all[: x["encoder_lengths"][idx]],
+                    y_all[max_encoder_length : (max_encoder_length + x["decoder_lengths"][idx])],
+                ),
+            )
+            y_hat = y_hat.detach().cpu()[idx, : x["decoder_lengths"][idx]]
+            y_quantile = y_quantile.detach().cpu()[idx, : x["decoder_lengths"][idx]]
+            y_raw = y_raw.detach().cpu()[idx, : x["decoder_lengths"][idx]]
+            y = y.detach().cpu()
+
+            if ax is None:
+                fig, ax = plt.subplots()
+            else:
+                fig = ax.get_figure()
+            n_pred = y_hat.shape[0]
+            x_obs = np.arange(-(y.shape[0] - n_pred), 0)
+            x_pred = np.arange(n_pred)
+            prop_cycle = iter(plt.rcParams["axes.prop_cycle"])
+            obs_color = next(prop_cycle)["color"]
+            pred_color = next(prop_cycle)["color"]
+
+            if len(x_obs) > 0:
+                if len(x_obs) > 1:
+                    plotter = ax.plot
+                else:
+                    plotter = ax.scatter
+                plotter(x_obs, y[:-n_pred], label="observed", c=obs_color)
+            if len(x_pred) > 1:
+                plotter = ax.plot
+            else:
+                plotter = ax.scatter
+
+            if show_future_observed:
+                plotter(x_pred, y[-n_pred:], label=None, c=obs_color)
+
+            plotter(x_pred, y_hat, label="predicted", c=pred_color)
+
+            plotter(x_pred, y_quantile[:, y_quantile.shape[1] // 2], c=pred_color, alpha=0.15)
+            for i in range(y_quantile.shape[1] // 2):
+                if len(x_pred) > 1:
+                    ax.fill_between(x_pred, y_quantile[:, i], y_quantile[:, -i - 1], alpha=0.15, fc=pred_color)
+                else:
+                    quantiles = torch.tensor([[y_quantile[0, i]], [y_quantile[0, -i - 1]]])
+                    ax.errorbar(
+                        x_pred,
+                        y[[-n_pred]],
+                        yerr=quantiles - y[-n_pred],
+                        c=pred_color,
+                        capsize=1.0,
+                    )
+
+            if add_loss_to_title is not False:
+                if isinstance(add_loss_to_title, bool):
+                    loss = self.loss
+                elif isinstance(add_loss_to_title, torch.Tensor):
+                    loss = add_loss_to_title.detach()[idx].item()
+                elif isinstance(add_loss_to_title, Metric):
+                    loss = add_loss_to_title
+                else:
+                    raise ValueError(f"add_loss_to_title '{add_loss_to_title}'' is unkown")
+                if isinstance(loss, MASE):
+                    loss_value = loss(y_raw[None], (y[-n_pred:][None], None), y[:n_pred][None])
+                elif isinstance(loss, Metric):
+                    try:
+                        loss_value = loss(y_raw[None], (y[-n_pred:][None], None))
+                    except Exception:
+                        loss_value = "-"
+                else:
+                    loss_value = loss
+                ax.set_title(f"Loss {loss_value}")
+            ax.set_xlabel("Time index")
+            figs.append(fig)
+
         if isinstance(x["encoder_target"], (tuple, list)):
             return figs
         else:

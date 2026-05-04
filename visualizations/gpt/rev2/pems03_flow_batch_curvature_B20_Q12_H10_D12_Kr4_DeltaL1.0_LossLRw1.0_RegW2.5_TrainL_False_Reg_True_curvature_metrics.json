@@ -1,0 +1,13 @@
+{
+  "kappa_min": 4.357649023323506e-23,
+  "kappa_max": 0.9109957814216614,
+  "kappa_mean": 0.29297399520874023,
+  "kappa_std": 0.20308776199817657,
+  "frac_negative_kappa": 0.0,
+  "b_ij_mean": 1.934040904045105,
+  "b_ij_max": 6.303821086883545,
+  "b_ij_nonzero_frac": 0.8956043720245361,
+  "lambda_2_original": -1.8765190290537248e-08,
+  "lambda_2_reweighted": -5.88729109907149e-09,
+  "lambda_2_pct_change": 12877.899635554968,
+  "G_t_offdiag_diag_ratio": 

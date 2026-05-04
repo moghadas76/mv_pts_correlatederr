@@ -14,8 +14,10 @@ from dynamic_graph import (
     SAGS_GCN,
     TemporalCorrelationKernel,
     GraphFactorKernelMixture,
+    CurvatureAwareGraphPrecision,
     DGLoGraPDistribution,
     precision_from_adj,
+    GARCHDiffusionCovariance,
 )
 import numpy as np
 import math
@@ -254,8 +256,24 @@ class BatchMGD_Kernel(MultivariateDistributionLoss):
 
     def map_x_to_predictive_distribution(self, x: torch.Tensor, mu: torch.Tensor, cov: torch.Tensor) -> distributions.Normal:
         x = x.permute(1, 0, 2)
-        distr = self.predictive_distribution(loc=mu, covariance_matrix=cov)
-
+        # Ensure positive definiteness with progressive jitter
+        eye = torch.eye(cov.shape[-1], device=cov.device, dtype=cov.dtype)
+        jitter = self.sigma_minimum ** 2
+        for _ in range(5):
+            info = torch.linalg.cholesky_ex(cov).info
+            if info.eq(0).all():
+                break
+            cov = cov + jitter * eye
+            jitter *= 10
+        try:
+            distr = self.predictive_distribution(loc=mu, covariance_matrix=cov)
+        except ValueError as e:
+            new_cov = (cov + cov.transpose(-1, -2)) / 2 + self.sigma_minimum**2 * eye
+            distr = self.predictive_distribution(loc=mu, covariance_matrix=new_cov)
+        except Exception as e:
+            print(f"Error creating predictive distribution: {e}")
+            raise
+        # distr = self.predictive_distribution(loc=mu, scale_tril=torch.linalg.cholesky(cov))
         scaler = distributions.AffineTransform(loc=x[0, :, 0], scale=x[0, :, 1], event_dim=1)
         if self._transformation is None:
             return distributions.TransformedDistribution(distr, [scaler])
@@ -346,6 +364,31 @@ class BatchMGD_Kernel(MultivariateDistributionLoss):
             loss = torch.cat(loss, dim=0).sum()*y_actual.size(0)
 
         return loss.sum()
+
+    def get_covariance_matrices(self) -> Dict[str, torch.Tensor]:
+        """
+        Extract covariance matrices for visualization.
+        Returns a dictionary with keys: 'sigma_D', 'C_t', 'G_t'
+        """
+        cov_matrices = {}
+        
+        # Get temporal correlation matrix C_t
+        if hasattr(self, 'c_list') and len(self.c_list) > 0:
+            if self.K_r > 1:
+                # Create dummy mixture weights for visualization (equal weights)
+                dummy_weights = torch.ones(1, 1, self.K_r) / self.K_r
+                C_t = self.get_corr(dummy_weights, self.K_r)
+            else:
+                C_t = self.get_corr(torch.ones(1, 1, 1), 1) if not self.static else self.get_corr(None, 1)
+            cov_matrices['C_t'] = C_t.detach()
+        
+        # Identity matrix for rank dimension (will be overridden in graph version)
+        if hasattr(self, 'eye_r') and self.eye_r is not None:
+            cov_matrices['G_t'] = self.eye_r.detach()
+        elif hasattr(self, 'rank'):
+            cov_matrices['G_t'] = torch.eye(self.rank)
+            
+        return cov_matrices
 
 class BatchMGDGraph_Kernel(BatchMGD_Kernel):
     """
@@ -494,10 +537,669 @@ class BatchMGDGraph_Kernel(BatchMGD_Kernel):
             loss = torch.cat(loss, dim=0).sum()*y_actual.size(0)
 
         return loss.sum()
+
+    def get_covariance_matrices(self) -> Dict[str, torch.Tensor]:
+        """
+        Extract covariance matrices for visualization.
+        Returns a dictionary with keys: 'sigma_D', 'C_t', 'G_t'
+        """
+        cov_matrices = super().get_covariance_matrices()
+        print("Base covariance matrices:", cov_matrices.values())
+        # Override G_t with graph factor kernel matrix
+        if hasattr(self, 'graph_factor_kernel'):
+            # Create dummy weights for visualization (equal weights)
+            if self.num_graph_kernels > 1:
+                dummy_graph_weights = torch.ones(1, 1, self.num_graph_kernels) / self.num_graph_kernels
+            else:
+                dummy_graph_weights = torch.ones(1, 1, 1)
+            G_t = self.graph_factor_kernel(dummy_graph_weights)
+            cov_matrices['G_t'] = G_t.detach()
         
+        return cov_matrices
+
+
+
+# ...existing code... (after BatchMGDGraph_Kernel class, before BatchMGDCurvature_Kernel)
+
+class BatchMGDDiffusion_Kernel(BatchMGD_Kernel):
+    """
+    Multivariate low-rank normal distribution loss with **graph Laplacian
+    diffusion + source term** for the factor covariance.
+
+    Extends BatchMGD_Kernel by replacing I_R in the Kronecker product with:
+
+        G_t = P^T (K K^T + S) P  ∈ R^{R×R}
+
+    where:
+        K = e^{-α τ L}             diffusion kernel on graph Laplacian L
+        S = diag(s²)               per-node source term (irreducible error floor)
+        P ∈ R^{N×R}                projection from node space to factor space
+
+    Physical interpretation (discrete heat equation):
+        de/dτ = -α L e + s
+
+    The sharp 1-hop drop in spatial correlation maps to the exponential kernel
+    e^{-α τ L}, while the persistent floor is captured by the source term S.
+
+    The resulting batch covariance is:
+        Σ^{bat}_t = L^{bat}_t (C_t ⊗ G_t)(L^{bat}_t)^T + diag(d^{bat}_t)
+    """
+
+    distribution_class = distributions.LowRankMultivariateNormal
+
+    def __init__(
+        self,
+        name: str = None,
+        quantiles: List[float] = [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98],
+        reduction: str = "mean",
+        rank: int = 10,
+        sigma_init: float = 1.0,
+        sigma_minimum: float = 1e-3,
+        n_layer: int = 1,
+        D: int = 12,
+        K_r: int = 4,
+        K_d: int = 1,
+        delta_l: float = 1.0,
+        train_l: bool = False,
+        lr: float = 1e-03,
+        wd: float = 1e-08,
+        reg_w: float = 1.0,
+        static: bool = False,
+        static_l: bool = True,
+        l: float = 1.0,
+        # --- diffusion arguments ---
+        diffusion_alpha: float = 1.0,
+        diffusion_tau: float = 1.0,
+        source_parameterization: str = "per_node",
+        learnable_projection: bool = True,
+        diffusion_sigma_min: float = 1e-4,
+        static_graph: torch.Tensor = None,
+        num_nodes: int = None,
+        # --- Revision 1: State-Aware Diffusion ---
+        hidden_proj_dim: int = 0,
+        hidden_ema_rate: float = 0.9,
+        # --- GARCH dynamics ---
+        use_garch: bool = False,
+        garch_alpha_init: float = 0.1,
+        garch_beta_init: float = 0.8,
+        garch_ema_resid_rate: float = 0.9,
+    ):
+        super().__init__(
+            name=name, quantiles=quantiles, reduction=reduction,
+            rank=rank, sigma_init=sigma_init, sigma_minimum=sigma_minimum,
+            n_layer=n_layer, D=D, K_r=K_r, K_d=K_d, delta_l=delta_l,
+            train_l=train_l, lr=lr, wd=wd, reg_w=reg_w,
+            static=static, static_l=static_l, l=l,
+        )
+
+        if num_nodes is None and static_graph is not None:
+            num_nodes = static_graph.shape[0]
+        if num_nodes is None:
+            raise ValueError(
+                "Either `num_nodes` or `static_graph` must be supplied."
+            )
+        self.num_nodes = num_nodes
+        self.hidden_proj_dim = hidden_proj_dim
+        self.use_garch = use_garch
+
+        # No extra mixture weights needed from the network
+        self.num_graph_kernels = 0
+
+        # When hidden_proj_dim > 0, signal BatchedEstimator to create a
+        # G_hidden_projector: Linear(hidden_size, hidden_proj_dim).
+        # The projected features will be appended to mixture_weights and
+        # carried through y_pred so that loss() can extract them.
+        if hidden_proj_dim > 0:
+            self.num_G_hidden = hidden_proj_dim
+
+        from dynamic_graph import DiffusionWithSourceCovariance
+        if use_garch:
+            self.diffusion_cov = GARCHDiffusionCovariance(
+                rank=rank,
+                num_nodes=num_nodes,
+                static_adj=static_graph,
+                alpha_init=diffusion_alpha,
+                tau_init=diffusion_tau,
+                sigma_min=diffusion_sigma_min,
+                learnable_projection=learnable_projection,
+                source_parameterization=source_parameterization,
+                hidden_proj_dim=hidden_proj_dim,
+                ema_rate=hidden_ema_rate,
+                garch_alpha_init=garch_alpha_init,
+                garch_beta_init=garch_beta_init,
+                ema_resid_rate=garch_ema_resid_rate,
+            )
+        else:
+            self.diffusion_cov = DiffusionWithSourceCovariance(
+                rank=rank,
+                num_nodes=num_nodes,
+                static_adj=static_graph,
+                alpha_init=diffusion_alpha,
+                tau_init=diffusion_tau,
+                sigma_min=diffusion_sigma_min,
+                learnable_projection=learnable_projection,
+                source_parameterization=source_parameterization,
+                hidden_proj_dim=hidden_proj_dim,
+                ema_rate=hidden_ema_rate,
+            )
+
+    def map_x_to_training_distribution(self, x: torch.Tensor) -> distributions.Normal:
+        mixture_weights = x[..., len(self.distribution_arguments)+2:]
+        x = x[..., :len(self.distribution_arguments)+2]
+        x = x.permute(1, 0, 2)
+        corr_mat_r = self.get_corr(mixture_weights[..., :self.K_r], self.K_r) if self.K_r > 1 else None
+
+        loc = x[..., 2].flatten().unsqueeze(0)
+        cov_factor = torch.block_diag(*x[..., 4:]).unsqueeze(0)
+        cov_diag = x[..., 3].flatten().unsqueeze(0)
+
+        # Compute diffusion-based factor covariance G_t
+        G_t = self.diffusion_cov()  # (R, R) PD
+
+        distr = self.training_distribution(
+            loc=loc,
+            cov_factor=cov_factor,
+            cov_diag=cov_diag,
+            corr_mat=corr_mat_r,
+            corr_eye=G_t,         # replaces I_R
+            reg_w=self.reg_w
+        )
+        scaler = distributions.AffineTransform(
+            loc=x[..., 0].flatten(), scale=x[..., 1].flatten(), event_dim=1
+        )
+
+        if self._transformation is None:
+            return distributions.TransformedDistribution(distr, [scaler])
+        else:
+            return distributions.TransformedDistribution(
+                distr, [scaler, TorchNormalizer.get_transform(self._transformation)["inverse_torch"]]
+            )
+
+    def loss(self, y_pred: torch.Tensor, y_actual: torch.Tensor) -> torch.Tensor:
+        N = y_pred.shape[1] // self.batch_cov_horizon
+        y_pred = y_pred[:, :self.batch_cov_horizon * N]
+        y_actual = y_actual[:, :self.batch_cov_horizon * N]
+        y_actual = y_actual.reshape(y_actual.shape[0], N, self.batch_cov_horizon)
+        y_pred = y_pred.reshape(y_pred.shape[0], N, self.batch_cov_horizon, -1)
+
+        # --- Revision 1: update node representation buffer ---
+        # y_pred shape: (batch, N, D, total_params)
+        # BatchedEstimator appended G_hidden_projector output as the last
+        # hidden_proj_dim dims of mixture_weights, which land at the tail of
+        # total_params.  Pool over batch and decoder steps → (N, proj_dim)
+        # and update the EMA buffer used by diffusion_cov._get_diffusion_kernel_full().
+        if self.hidden_proj_dim > 0:
+            node_feat = y_pred[:, :, :, -self.hidden_proj_dim:].detach()  # (B, N, D, d)
+            node_feat_pooled = node_feat.mean(dim=(0, 2))                  # (N, d)
+            self.diffusion_cov.update_node_repr(node_feat_pooled)
+
+        if self.static:
+            loss = []
+            for i in range(N):
+                loss.append(
+                    -self.map_x_to_training_distribution(y_pred[:, i]).log_prob(
+                        y_actual[:, i]
+                    ).unsqueeze(-1)
+                )
+                if self.use_garch:
+                    sq_resid = self._compute_sq_resid_per_node(y_pred[:, i], y_actual[:, i])
+                    self.diffusion_cov.update_garch_state(sq_resid)
+            loss = torch.cat(loss, dim=-1)
+        else:
+            loss = []
+            for i in range(N):
+                loss.append(
+                    -self.map_x_to_training_distribution(y_pred[:, i]).log_prob(
+                        y_actual[:, i].T.flatten().unsqueeze(0)
+                    )
+                )
+                if self.use_garch:
+                    sq_resid = self._compute_sq_resid_per_node(y_pred[:, i], y_actual[:, i])
+                    self.diffusion_cov.update_garch_state(sq_resid)
+            loss = torch.cat(loss, dim=0).sum() * y_actual.size(0)
+
+        return loss.sum()
+
+    @torch.no_grad()
+    def _compute_sq_resid_per_node(
+        self, y_pred_block: torch.Tensor, y_actual_block: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute per-node mean squared residual in normalised space for the GARCH state update.
+
+        Extracts the predicted normalised mean from y_pred_block, inverts the
+        per-node affine normalisation, and returns the squared error averaged
+        over the decoder horizon D.
+
+        Args:
+            y_pred_block:  (N, D, n_params) — network output for one time block,
+                           where N = num_nodes (batch dim) and D = batch_cov_horizon.
+            y_actual_block: (N, D) actual values in original scale.
+
+        Returns:
+            sq_resid: (N,) per-node mean squared normed residual.
+        """
+        # Extract normalisation parameters and predicted mean (all in normed space)
+        x = y_pred_block[..., :len(self.distribution_arguments) + 2].permute(1, 0, 2)  # (D, N, params)
+        scale_loc = x[..., 0]                     # (D, N) normaliser mean
+        scale_std = x[..., 1].clamp(min=1e-8)     # (D, N) normaliser scale
+        loc_normed = x[..., 2]                    # (D, N) predicted mean in normed space
+
+        # Normalise actuals: (N, D).T → (D, N)
+        actual_normed = (y_actual_block.T - scale_loc) / scale_std   # (D, N)
+        r = actual_normed - loc_normed                                 # (D, N) residual
+        return (r ** 2).mean(dim=0)                                    # (N,)
+
+    def get_covariance_matrices(self) -> Dict[str, torch.Tensor]:
+        cov_matrices = super().get_covariance_matrices()
+        if hasattr(self, 'diffusion_cov'):
+            G_t = self.diffusion_cov()
+            cov_matrices['G_t'] = G_t.detach()
+            # Also store interpretable parameters (includes GARCH stats when use_garch=True)
+            cov_matrices['diffusion_params'] = self.diffusion_cov.get_diffusion_parameters()
+        return cov_matrices
+# ...existing code...
+
+class BatchMGDCurvature_Kernel(BatchMGD_Kernel):
+    """
+    Multivariate low-rank normal distribution loss with **curvature-aware
+    graph precision** for the factor covariance.
+
+    Extends BatchMGD_Kernel by replacing  I_R  in the Kronecker product with
+
+        G_t = Q_t^{-1},   Q_t = α I_R + β L'_R
+
+    where L'_R is the projected Laplacian of a curvature-reweighted graph:
+
+        Step A:  W_t = ½(Ã_t + Ã_t^T)             (batch-mean symmetrised adj)
+        Step B:  κ_{ij,t} = BalancedForman(W_t)      (curvature proxy)
+                 b_{ij,t} = softplus(τ(κ_0 − κ_{ij,t}))  (bottleneck score)
+        Step C:  W'_{ij,t} = W_{ij,t}(1 + λ b_{ij,t})    (reweighted edges)
+                 L'_t  from  W'_t,    L'_R = P^T L'_t P
+                 Q_t = α I_R + β L'_R   (precision, PD)
+                 G_t = Q_t^{-1}
+
+    This directly counteracts Theorem-4 bottlenecks by strengthening coupling
+    along negatively-curved edges, while preserving the efficient Woodbury
+    solver pathway.
+
+    The resulting batch covariance is:
+
+        Σ^{bat}_t = L^{bat}_t (C_t ⊗ G_t)(L^{bat}_t)^T + diag(d^{bat}_t)
+    """
+
+    distribution_class = distributions.LowRankMultivariateNormal
+
+    def __init__(
+        self,
+        name: str = None,
+        quantiles: List[float] = [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98],
+        reduction: str = "mean",
+        rank: int = 10,
+        sigma_init: float = 1.0,
+        sigma_minimum: float = 1e-3,
+        n_layer: int = 1,
+        D: int = 12,
+        K_r: int = 4,
+        K_d: int = 1,
+        delta_l: float = 1.0,
+        train_l: bool = False,
+        lr: float = 1e-03,
+        wd: float = 1e-08,
+        reg_w: float = 1.0,
+        static: bool = False,
+        static_l: bool = True,
+        l: float = 1.0,
+        # --- curvature precision arguments ---
+        curvature_alpha: float = 0.01,
+        curvature_beta: float = 1.0,
+        curvature_lam: float = 1.0,
+        curvature_kappa_0: float = 0.0,
+        curvature_tau: float = 5.0,
+        curvature_sigma_min: float = 1e-4,
+        static_graph: torch.Tensor = None,
+        num_nodes: int = None,
+    ):
+        # Forward ALL parent parameters so BatchMGD_Kernel sets up properly
+        super().__init__(
+            name=name, quantiles=quantiles, reduction=reduction,
+            rank=rank, sigma_init=sigma_init, sigma_minimum=sigma_minimum,
+            n_layer=n_layer, D=D, K_r=K_r, K_d=K_d, delta_l=delta_l,
+            train_l=train_l, lr=lr, wd=wd, reg_w=reg_w,
+            static=static, static_l=static_l, l=l,
+        )
+
+        # Infer num_nodes
+        if num_nodes is None and static_graph is not None:
+            num_nodes = static_graph.shape[0]
+        if num_nodes is None:
+            raise ValueError(
+                "Either `num_nodes` or `static_graph` must be supplied "
+                "so that the curvature precision can be constructed."
+            )
+        self.num_nodes = num_nodes
+
+        # No graph-kernel mixture weights needed from the network.
+        # The curvature module is entirely self-contained (learnable α, β, λ, κ_0, τ).
+        self.num_graph_kernels = 0   # tells BatchedEstimator not to add a projector
+
+        # --- Curvature-Aware Graph Precision ---
+        # self.curvature_precision = CurvatureAwareGraphPrecision(
+        #     rank=rank,
+        #     num_nodes=num_nodes,
+        #     static_adj=static_graph,
+        #     alpha=curvature_alpha,
+        #     beta=curvature_beta,
+        #     lam=curvature_lam,
+        #     kappa_0=curvature_kappa_0,
+        #     tau=curvature_tau,
+        #     sigma_min=curvature_sigma_min,
+        # )
+           # ── Fix A: learnable P ──────────────────────────────────────────────
+        from dynamic_graph import CurvatureAwareGraphPrecision_LearnP
+        self.curvature_precision = CurvatureAwareGraphPrecision_LearnP(
+            rank=rank,
+            num_nodes=num_nodes,
+            static_adj=static_graph,
+            alpha=curvature_alpha,
+            beta=curvature_beta,
+            lam=curvature_lam,
+            kappa_0=curvature_kappa_0,
+            tau=curvature_tau,
+            sigma_min=curvature_sigma_min,
+            init_with_eigenvectors=True,   # warm-start, set False for random init
+        )
+        self.lambda_p = 0.1
+        #         # ── Fix B: spectral + learned rotation ──────────────────────────────
+        # from dynamic_graph import CurvatureAwareGraphPrecision_LearnedRotation
+        # self.curvature_precision = CurvatureAwareGraphPrecision_LearnedRotation(
+        #     rank=rank,
+        #     num_nodes=num_nodes,
+        #     static_adj=static_graph,
+        #     alpha=curvature_alpha,
+        #     beta=curvature_beta,
+        #     lam=curvature_lam,
+        #     kappa_0=curvature_kappa_0,
+        #     tau=curvature_tau,
+        #     sigma_min=curvature_sigma_min,
+        #     correction_rank=max(1, rank // 3),          # set smaller (e.g. rank//2) to regularise
+        # )
+
         
+
+    # ------------------------------------------------------------------
+    # Override:  inject  G_t = Q_t^{-1}  in place of  I_R
+    # ------------------------------------------------------------------
+    def map_x_to_training_distribution(self, x: torch.Tensor) -> distributions.Normal:
+        mixture_weights = x[..., len(self.distribution_arguments)+2:]
+        x = x[..., :len(self.distribution_arguments)+2]
+        x = x.permute(1, 0, 2)
+        corr_mat_r = self.get_corr(mixture_weights[..., :self.K_r], self.K_r) if self.K_r > 1 else None
+
+        ################### Method 1 ####################
+        loc = x[..., 2].flatten().unsqueeze(0)
+        cov_factor = torch.block_diag(*x[..., 4:]).unsqueeze(0)
+        cov_diag = x[..., 3].flatten().unsqueeze(0)
+
+        # ----- Compute curvature-aware factor covariance G_t -----
+        # No mixture_weights needed — the module is self-contained.
+        G_t = self.curvature_precision()   # (R, R)  PD
+
+        distr = self.training_distribution(
+            loc=loc,              # (1, DB)
+            cov_factor=cov_factor,  # (1, DB, DR)
+            cov_diag=cov_diag,    # (1, DB)
+            corr_mat=corr_mat_r,  # (D, D)
+            corr_eye=G_t,         # (R, R)  ← was I_R
+            reg_w=self.reg_w
+        )
+        scaler = distributions.AffineTransform(
+            loc=x[..., 0].flatten(), scale=x[..., 1].flatten(), event_dim=1
+        )
+
+        if self._transformation is None:
+            return distributions.TransformedDistribution(distr, [scaler])
+        else:
+            return distributions.TransformedDistribution(
+                distr, [scaler, TorchNormalizer.get_transform(self._transformation)["inverse_torch"]]
+            )
+
+    def loss(self, y_pred: torch.Tensor, y_actual: torch.Tensor) -> torch.Tensor:
+        """
+        loss function: BatchCovLoss
+        y_pred: (batch_size (N), Q, n_params), params for normed data
+        y_actual: (batch_size (N), Q), this comes from dataloader y of (x, y), in original scale
+        """
+        N = y_pred.shape[1] // self.batch_cov_horizon
+        y_pred = y_pred[:, :self.batch_cov_horizon * N]
+        y_actual = y_actual[:, :self.batch_cov_horizon * N]
+        y_actual = y_actual.reshape(y_actual.shape[0], N, self.batch_cov_horizon)
+
+        if self.static:
+            y_pred = y_pred.reshape(y_pred.shape[0], N, self.batch_cov_horizon, -1)
+            loss = []
+            for i in range(y_pred.shape[1]):
+                loss.append(
+                    -self.map_x_to_training_distribution(y_pred[:, i]).log_prob(
+                        y_actual[:, i]
+                    ).unsqueeze(-1)
+                )
+            loss = torch.cat(loss, dim=-1)
+        else:
+            y_pred = y_pred.reshape(y_pred.shape[0], N, self.batch_cov_horizon, -1)
+            loss = []
+            for i in range(y_pred.shape[1]):
+                loss.append(
+                    -self.map_x_to_training_distribution(y_pred[:, i]).log_prob(
+                        y_actual[:, i].T.flatten().unsqueeze(0)
+                    )
+                )
+            loss = torch.cat(loss, dim=0).sum() * y_actual.size(0)
+
+        return loss.sum()
+    
+    def get_covariance_matrices(self) -> Dict[str, torch.Tensor]:
+        cov_matrices = super().get_covariance_matrices()
+        # Override G_t with curvature-aware precision matrix
+        if hasattr(self, 'curvature_precision'):
+            G_t = self.curvature_precision()  # This is actually the precision matrix Q_t
+            cov_matrices['G_t'] = torch.linalg.inv(G_t).detach()  # Return the covariance (inverse of precision)
         
-        
+        return cov_matrices
+
+
+
+class TStudent_BatchMGDCurvature_Kernel(BatchMGDCurvature_Kernel):
+
+    distribution_class = MultivariateStudentT
+
+    def map_x_to_distribution(self, x: torch.Tensor) -> distributions.Normal:
+        x = x.permute(1, 0, 2)  # (Q, B, P)
+
+        loc = x[..., 2]                 # (Q, B)
+        cov_diag = x[..., 3]            # (Q, B), already positive after rescale_parameters
+        cov_factor = x[..., 4:]         # (Q, B, R)
+
+        cov = cov_factor @ cov_factor.mT + torch.diag_embed(cov_diag)
+        cov = 0.5 * (cov + cov.transpose(-1, -2))  # numerical symmetry
+        cov = cov + (self.sigma_minimum ** 2) * torch.eye(
+            cov.size(-1), device=cov.device, dtype=cov.dtype
+        )
+
+        chol = torch.linalg.cholesky_ex(cov)
+        if not chol.info.eq(0).all():
+            raise RuntimeError("Covariance is not PD; increase jitter or inspect params.")
+        scale_tril = chol.L
+
+        distr = self.distribution_class(
+            df=torch.tensor(25.0, device=x.device, dtype=x.dtype),  # or learn/predict df
+            loc=loc,
+            scale_tril=scale_tril,
+        )
+        scaler = distributions.AffineTransform(loc=x[0, :, 0], scale=x[0, :, 1], event_dim=1)
+        if self._transformation is None:
+            return distributions.TransformedDistribution(distr, [scaler])
+        else:
+            return distributions.TransformedDistribution(
+                distr, [scaler, TorchNormalizer.get_transform(self._transformation)["inverse_torch"]]
+            )
+
+class BatchMGDLearnable_Kernel(BatchMGD_Kernel):
+    """
+    Multivariate low-rank normal distribution loss with **learnable factor
+    covariance** G_t that bypasses the graph Laplacian entirely.
+
+    Extends BatchMGD_Kernel by replacing I_R in the Kronecker product with a
+    directly-parameterized PSD matrix:
+
+        G_t = I_R + V diag(softplus(φ)) V^T      (trace-normalized to R)
+
+    where V is Cayley-parameterized orthonormal and φ are learnable eigenvalues.
+
+    Key properties:
+        · Initialized at I_R → training starts from the kernel baseline.
+        · Trace normalization keeps covariance scale consistent with I_R.
+        · No Laplacian, curvature, or graph adjacency needed.
+        · Learns cross-factor correlations purely from NLL signal.
+
+    The resulting batch covariance is:
+
+        Σ^{bat}_t = L^{bat}_t (C_t ⊗ G_t)(L^{bat}_t)^T + diag(d^{bat}_t)
+    """
+
+    distribution_class = distributions.LowRankMultivariateNormal
+
+    def __init__(
+        self,
+        name: str = None,
+        quantiles: List[float] = [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98],
+        reduction: str = "mean",
+        rank: int = 10,
+        sigma_init: float = 1.0,
+        sigma_minimum: float = 1e-3,
+        n_layer: int = 1,
+        D: int = 12,
+        K_r: int = 4,
+        K_d: int = 1,
+        delta_l: float = 1.0,
+        train_l: bool = False,
+        lr: float = 1e-03,
+        wd: float = 1e-08,
+        reg_w: float = 1.0,
+        static: bool = False,
+        static_l: bool = True,
+        l: float = 1.0,
+        # --- learnable factor cov arguments ---
+        correction_rank: int = None,      # rank of V Φ V^T correction (defaults to R//2)
+        learnable_sigma_min: float = 1e-4,
+        G_hidden_dim: int = 8,           # 0 = static G_t, >0 = time-varying conditioned on hidden
+    ):
+        # Forward ALL parent parameters so BatchMGD_Kernel sets up properly
+        super().__init__(
+            name=name, quantiles=quantiles, reduction=reduction,
+            rank=rank, sigma_init=sigma_init, sigma_minimum=sigma_minimum,
+            n_layer=n_layer, D=D, K_r=K_r, K_d=K_d, delta_l=delta_l,
+            train_l=train_l, lr=lr, wd=wd, reg_w=reg_w,
+            static=static, static_l=static_l, l=l,
+        )
+
+        # No graph-kernel mixture weights needed from the network.
+        self.num_graph_kernels = 0
+
+        # Number of extra hidden features appended for G_t conditioning
+        self.num_G_hidden = G_hidden_dim
+
+        # --- Learnable Factor Covariance (time-varying when G_hidden_dim > 0) ---
+        from dynamic_graph import LearnableFactorCovariance
+        self.learnable_factor_cov = LearnableFactorCovariance(
+            rank=rank,
+            correction_rank=correction_rank,
+            sigma_min=learnable_sigma_min,
+            hidden_dim=G_hidden_dim,
+        )
+
+    # ------------------------------------------------------------------
+    # Override:  inject  G_t  in place of  I_R
+    # ------------------------------------------------------------------
+    def map_x_to_training_distribution(self, x: torch.Tensor) -> distributions.Normal:
+        mixture_weights = x[..., len(self.distribution_arguments)+2:]
+        x = x[..., :len(self.distribution_arguments)+2]
+        x = x.permute(1, 0, 2)
+        corr_mat_r = self.get_corr(mixture_weights[..., :self.K_r], self.K_r) if self.K_r > 1 else None
+
+        ################### Method 1 ####################
+        loc = x[..., 2].flatten().unsqueeze(0)
+        cov_factor = torch.block_diag(*x[..., 4:]).unsqueeze(0)
+        cov_diag = x[..., 3].flatten().unsqueeze(0)
+
+        # ----- Compute learnable factor covariance G_t (time-varying) -----
+        if self.num_G_hidden > 0:
+            # Hidden features are appended after K_r mixture weights
+            g_hidden = mixture_weights[..., self.K_r:self.K_r + self.num_G_hidden]
+            g_hidden_pooled = g_hidden.mean(dim=(0, 1))  # (num_G_hidden,)
+            G_t = self.learnable_factor_cov(g_hidden_pooled)  # (R, R) PD, conditioned on hidden
+        else:
+            G_t = self.learnable_factor_cov()                 # (R, R) PD, static fallback
+
+        distr = self.training_distribution(
+            loc=loc,              # (1, DB)
+            cov_factor=cov_factor,  # (1, DB, DR)
+            cov_diag=cov_diag,    # (1, DB)
+            corr_mat=corr_mat_r,  # (D, D)
+            corr_eye=G_t,         # (R, R)  ← was I_R
+            reg_w=self.reg_w
+        )
+        scaler = distributions.AffineTransform(
+            loc=x[..., 0].flatten(), scale=x[..., 1].flatten(), event_dim=1
+        )
+
+        if self._transformation is None:
+            return distributions.TransformedDistribution(distr, [scaler])
+        else:
+            return distributions.TransformedDistribution(
+                distr, [scaler, TorchNormalizer.get_transform(self._transformation)["inverse_torch"]]
+            )
+
+    def loss(self, y_pred: torch.Tensor, y_actual: torch.Tensor) -> torch.Tensor:
+        """
+        loss function: BatchCovLoss  (same as BatchMGD_Kernel.loss but uses G_t)
+        """
+        N = y_pred.shape[1] // self.batch_cov_horizon
+        y_pred = y_pred[:, :self.batch_cov_horizon * N]
+        y_actual = y_actual[:, :self.batch_cov_horizon * N]
+        y_actual = y_actual.reshape(y_actual.shape[0], N, self.batch_cov_horizon)
+
+        if self.static:
+            y_pred = y_pred.reshape(y_pred.shape[0], N, self.batch_cov_horizon, -1)
+            loss = []
+            for i in range(y_pred.shape[1]):
+                loss.append(
+                    -self.map_x_to_training_distribution(y_pred[:, i]).log_prob(
+                        y_actual[:, i]
+                    ).unsqueeze(-1)
+                )
+            loss = torch.cat(loss, dim=-1)
+        else:
+            y_pred = y_pred.reshape(y_pred.shape[0], N, self.batch_cov_horizon, -1)
+            loss = []
+            for i in range(y_pred.shape[1]):
+                loss.append(
+                    -self.map_x_to_training_distribution(y_pred[:, i]).log_prob(
+                        y_actual[:, i].T.flatten().unsqueeze(0)
+                    )
+                )
+            loss = torch.cat(loss, dim=0).sum() * y_actual.size(0)
+
+        return loss.sum()
+
+    def get_covariance_matrices(self) -> Dict[str, torch.Tensor]:
+        cov_matrices = super().get_covariance_matrices()
+        if hasattr(self, 'learnable_factor_cov'):
+            G_t = self.learnable_factor_cov()
+            cov_matrices['G_t'] = G_t.detach()
+        return cov_matrices
+
+
 
 # class GraphBatchMGD_Kernel(BatchMGD_Kernel):
 #     ...
@@ -765,6 +1467,24 @@ class GeneralLowRankMultivariateNormalGraphPrecision(nn.Module):
         const = DN * math.log(2.0 * math.pi)
 
         return -0.5 * (quad + logdet_Sigma + const)                   # (B,)
+
+    def get_covariance_matrices(self) -> Dict[str, torch.Tensor]:
+        """
+        Extract covariance matrices for visualization.
+        Returns a dictionary with keys: 'sigma_D', 'C_t', 'G_t'
+        """
+        cov_matrices = super().get_covariance_matrices()
+        
+        # Override G_t with curvature-aware graph precision matrix
+        if hasattr(self, 'curvature_precision'):
+            # forward() now returns G_t = Q_t^{-1} directly (no args needed)
+            try:
+                G_t = self.curvature_precision()  # (R, R), already covariance
+                cov_matrices['G_t'] = G_t.detach()
+            except Exception:
+                cov_matrices['G_t'] = torch.eye(self.rank)
+        
+        return cov_matrices
 
 class BatchMGD_AR(BatchMGD_Kernel, MultivariateDistributionLoss):
     """
