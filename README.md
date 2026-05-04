@@ -80,7 +80,7 @@ Outputs: checkpoints in `logs/<model>/`, metrics in `metrics/`, TensorBoard logs
 
 ```bibtex
 @inproceedings{teger_anonymous,
-  title     = {TEGER: Temporal Graph-based Error Correction for Multivariate Time-Series Forecasting},
+  title     = {Improving Spatio-Temporal Residual Error Propagation by Mitigating Over-Squashing},
   author    = {Anonymous},
   booktitle = {Submitted to NeurIPS},
   year      = {2026},
