@@ -1,0 +1,1434 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2026}
+
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+\usepackage{multirow}
+%% Custom algorithm environment (algorithm/algpseudocode unavailable)
+\usepackage{fancybox}
+\usepackage{enumitem}
+% \newcounter{algorithm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{cleveref}
+
+% ---- Theorem environments ------------------------------------------------
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% ---- Notation shorthands -------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\norm}[1]{\left\|#1\right\|}
+\newcommand{\abs}[1]{\left|#1\right|}
+\newcommand{\calG}{\mathcal{G}}
+\newcommand{\calE}{\mathcal{E}}
+\newcommand{\calB}{\mathcal{B}}
+\renewcommand{\vec}{\operatorname{vec}}
+
+% Note. For the workshop paper template, both \title{} and \workshoptitle{} are required, with the former indicating the paper title shown in the title and the latter indicating the workshop title displayed in the footnote. 
+\title{Improving Spatio-Temporal Residual Error Propagation by Mitigating Over-Squashing}
+
+
+
+\author{%
+  David S.~Hippocampus\thanks{Use footnote for providing further information
+    about author (webpage, alternative address)---\emph{not} for acknowledging
+    funding agencies.} \\
+  Department of Computer Science\\
+  Cranberry-Lemon University\\
+  Pittsburgh, PA 15213 \\
+  \texttt{hippo@cs.cranberry-lemon.edu} \\
+  % examples of more authors
+  % \And
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+  % \AND
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+  % \And
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+  % \And
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+}
+\author{%
+  Seyed Mohamad Moghadas$^{1,2}$, Esther Rodrigo Bonet$^{1,2}$, Bruno Cornelis, Adrian Munteanu$^{1,2}\thanks{Senior IEEE Member}$\\
+    $^{1}$ ETRO Department, Vrije Universiteit Brussel, B-1050 Brussels, Belgium \\
+  $^{2}$ imec Kapeldreef 75, B-3001 Leuven, Belgium\\
+  \texttt{Seyed.Mohamad.Moghadas, Esther.Rodrigo.Bonet,Adrian.Munteanu@vub.be} \\
+  % examples of more authors
+  % \And
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+  % \AND
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+  % \And
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+  % \And
+  % Coauthor \\
+  % Affiliation \\
+  % Address \\
+  % \texttt{email} \\
+}
+
+
+\begin{document}
+
+
+\maketitle
+
+% a structured uncertainty module that extends error-correlated autoregressive forecasting
+
+\begin{abstract}
+Residual error propagation remains a fundamental problem in recurrent models, where small prediction inaccuracies compound over time and degrade long-horizon performance. Accurately modeling the correlation structure of such residuals is critical for reliable uncertainty quantification in probabilistic multivariate time-series forecasting. While recent time-series deep models efficiently 
+parametrize time-varying \textit{contemporaneous} correlations, they often assume temporal independence of errors and neglect spatial correlation across the observed network. In this paper, we introduce Teger, a structured uncertainty module that overcomes the spatial and temporal limitations of error-correlated autoregressive forecasting. Teger proposes a spatial curvature-aware graph rewiring mechanism explicitly strengthening information-bottleneck edges identified by discrete Forman curvature. The component is integrated into a low-rank-plus-diagonal covariance head, preserving tractable inference via the Woodbury identity. Teger is backbone-agnostic, requiring only the latent state produced by any autoregressive encoder. We provide theoretical evidence of Teger, and experimentally evaluate it on LSTM, Transformer, and xLSTM
+backbones across four real-world spatio-temporal datasets, showing consistent improvement in Continuous Ranked Probability Score (CRPS). We further provide a formal theoretical analysis connecting curvature-aware
+rewiring to (i)~oversquashing alleviation, (ii)~improved spectral
+connectivity, (iii)~reduced effective resistance, and (iv)~improved
+covariance calibration bounds.~\href{https://anonymous.4open.science/r/Teger-D6F1/}{Repo}
+\end{abstract}
+
+% , empirical coverage, and calibration over TCVAR baselines
+
+
+\section{Introduction}
+\label{sec:intro}
+With the rapid development of Intelligent Transportation Systems (ITS), traffic forecasting has become a fundamental component of modern urban infrastructure. Accurate forecasting enables informed traffic management, congestion mitigation, and route planning~\cite{li2018diffusion}. Recent advances in deep learning have significantly improved the modeling of  complex spatio-temporal dependencies in ITS, particularly through graph neural networks (GNNs). 
+ Yet, most approaches focus primarily on predicting point estimates~\cite{Benidis_2022, Song_Lin_Guo_Wan_2020, ijcai2019p264, Zheng_Fan_Wang_Qi_2020, salinas2019highdimensional, shang2021discrete, nie2023time}, while modeling uncertainty remains comparatively underexplored. In practice, empirical evidence reveals pronounced spatiotemporal covariance patterns in traffic residuals: predictions at one sensor can be strongly influenced by upstream and downstream conditions, leading to correlated residuals across the network (Figure~\ref{fig:sub2}). Despite this, existing methods rarely capture such structure. And even when covariance is modeled, it is typically restricted to the temporal dimension, thereby failing to fully capture their spatial interaction. For instance, TCVAR~\cite{zheng2024multivariateprobabilistictimeseries} explicitly models the temporal covariance, but does not extend this modeling across space.  Beyond covariance structure, these models also struggle to explicitly capture volatility, leading to miss-calibrated uncertainty estimates~\cite{UQTFF}. On top, most methods are restricted to specific autoregressive
+backbones, limiting in flexibility and applicability.
+
+The inability to capture spatio-temporal covariance is intrinsically linked to the over-squashing phenomenon in GNNs, where long-range dependencies are excessively compressed into bounded representations, degrading information propagation across the traffic graph. In recent years, OQ has received increasing attention in the graph learning community~\cite{topping2022understandingoversquashingbottlenecksgraphs,alon2021bottleneck}, with works focusing on classical tasks such as node classification and edge prediction. Two families of remedies, both operating inside the message-passing layer of GNNs, are now well-established. \emph{Curvature-based rewiring}, introduced by SDRF~\cite{topping2022understandingoversquashingbottlenecksgraphs} and subsequently refined, identifies bottleneck edges through discrete Ricci-style curvature and adds or removes edges to relieve them. Alternatively, \emph{sequential structural rewiring}, exemplified by LASER~\cite{barbero2024laser}, constructs a sequence of augmented graph snapshots that add long-range shortcuts while explicitly trading off connectivity, locality, and sparsity. 
+
+\cite{mariscaover} extends the notion to spatio-temporal networks and establishes a theoretical foundation. 
+%They formalize the spatiotemporal over-squashing problem and show its distinct characteristics compared to the static setting.
+Counterintuitively, their analysis shows that convolutional spatiotemporal graph neural networks (STGNNs) favor information propagation from temporally distant nodes over closer ones. However, they do not formalize the effect of OQ mitigation on predictive performance, and neither their work nor prior work explores it in the context of dynamic graphs, to the best of our knowledge. However, we argue that spatio-temporal forecast errors do not occur in isolation: they propagate across the network's dynamic structure following its underlying topology, and this propagation is both time-varying and influenced by latent system states (Fig.~\ref{fig:main}). Capturing this structure is, at heart, a covariance-modeling problem on a dynamic graph, and the same bottlenecks that distort message passing also distort the spatial covariance of residuals---concentrating dependence along thin chains and underestimating cross-region correlation. In this work, we address these gaps through a backbone-agnostic, parametric, probabilistic framework for spatio-temporal networks such as road graphs. We provide a theoretical analysis linking OQ alleviation to improved spectral connectivity and reduced effective resistance, and show how these properties lead to enhanced predictive performance by mitigating residual error propagation.
+
+
+
+We propose \textbf{Teger}, a backbone-agnostic probabilistic framework for
+spatio-temporal forecasting on dynamic graphs that places a curvature-aware
+spatial covariance inside a low-rank-plus-diagonal noise head. In contrast
+to LASER~\cite{barbero2024laser}, which \emph{adds} edges via a sequence of
+augmented snapshots, and to SDRF~\cite{topping2022understandingoversquashingbottlenecksgraphs},
+which adds and removes edges based on Balanced Forman curvature, Teger keeps
+the input topology fixed and only \emph{reweights} existing edges using the
+same Balanced Forman signal. This is, deliberately, a weaker structural
+intervention: it cannot create long-range pathways where none exist, but it
+preserves locality and sparsity by construction, sidesteps the
+connectivity-locality-sparsity trade-off that motivates LASER's sequential
+design, and---most importantly for our setting---admits a closed-form
+low-rank projection that integrates cleanly into a Woodbury-style covariance
+update. The contribution of Teger is therefore a new curvature-aware reweighting  algorithm and at the same time a probabilistic-forecasting counterpart to the
+existing OQ-mitigation literature. 
+
+Our contributions are four-fold: (1) A dynamic low-rank-plus-diagonal covariance model for
+    spatio-temporal residuals, capturing spatial dependence through
+    graph-aware latent factors and temporal dependence through an
+    autoregressive structure on the residual process. (2) A curvature-based spatial correlation mechanism modeling error diffusion on the dynamic graph, with state-aware dynamics and volatility adaptation.
+  (3) A curvature-aware edge-reweighting step embedded inside the
+    covariance head, together with a learnable low-rank projection that maps
+    the rewired Laplacian into an $R$-dimensional factor space at
+    $\mathcal{O}(R^3)$ rather than $\mathcal{O}(N^3)$ cost. To our
+    knowledge, this is the first integration of curvature-based rewiring
+    into a probabilistic spatio-temporal forecaster.
+  (4) Integration of these components into a unified probabilistic
+    autoregressive framework that preserves computational tractability while
+    materially expanding the expressiveness of spatio-temporal uncertainty
+    modeling.
+
+We are explicit about the scope of the OQ-mitigation claim: edge reweighting is a strictly weaker tool than the structural rewirings of LASER and SDRF, and it can relieve over-squashing only in regimes where bottleneck edges are present but underweighted---a regime we argue is well-matched to road-network forecasting, where the physical road graph is essentially fixed but edge importances vary in time. We discuss when this regime applies in Section~\ref{sec:brussels_usecase}.
+
+The paper is structured as follows. Section 2 overviews the related work. Section 3 presents the proposed methodology and performance figures used to compare the proposed spatial curvature-aware graph reweighting mechanism against the state of the art. Section 4 reports and analyses the experimental results. Section 5 draws the conclusions.
+
+
+
+% ==========================================================================
+\section{Related Work}
+% \label{sec:related}
+
+\paragraph{Neural time-series forecasting.}
+Traffic forecasting with deep learning is a rapidly developing research area~\cite{Benidis_2022}. While spatial (CNN-based)~\cite{Song_Lin_Guo_Wan_2020, ijcai2019p264} and recurrent (RNN-based~\cite{Zheng_Fan_Wang_Qi_2020} and LSTM-based models~\cite{salinas2019highdimensional, shang2021discrete}) models have been proposed, we review transformer-based models due to their powerful ability in extracting spatio-temporal features and their effectiveness in few-shot learning scenarios.
+% In light of the recent success of transformers \cite{vaswani2023attention} for sequence-to-sequence modeling for natural language processing, many variations of transformers have been proposed for time series forecasting.
+Inspired by the vanilla transformer mechanism introduced in~\cite{vaswani2023attention}, PatchTST \cite{nie2023time} highlights the importance of extracting local semantic information from time series data, often overlooked by models that use point-wise tokens and then re-process the output of a transformer for a point forecast or a probabilistic forecast. Other works build on the transformer architecture, and propose alternative strategies to the vanilla attention mechanism~\cite{moghadas2022statnet},
+% STEP\cite{10.1145/3534678.3539396}
+leading to models better tailored for time-series forecasting~\cite{lim2020temporal, oreshkin2020nbeats, zhou2021informer}. For instance, ~\cite{moghadas2022statnet} proposes a spatio-temporal attention  model, others leverage trend-aware decomposition in the definition of the attention layer~\cite{wu2022autoformer, woo2022etsformer, liu2022pyraformer, zhou2022fedformer, ni2024basisformer, li2020enhancing}. On the other hand, copula-based transformer models~\cite{ashok2024tactis2}, are better at capturing volatilities, defined as the degree of variation in the time-series value over time. 
+
+\paragraph{Correlated errors in probabilistic forecasting.}
+Recent research in multivariate probabilistic forecasting~\cite{zheng2024multivariateprobabilistictimeseries} has highlighted the limitations of one-step-ahead independent likelihood training, which ignores serial correlations in forecast errors. A tractable remedy is to introduce a latent low-dimensional error process and correlate it within a finite horizon using a dynamic correlation matrix (e.g., kernel-mixture parameterizations)~\cite{zheng2024multivariateprobabilistictimeseries}. This constructs a block covariance over a temporal window while maintaining efficient likelihood computation using the Woodbury identity~\cite{MR1927606} and the matrix determinant lemma. {These methods handle temporal correlations only within the residuals, whereas our method additionally captures spatial dependencies across them.} 
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.8\textwidth]{figs/arch_rev2.pdf}
+\caption{Overview of Teger. An autoregressive backbone encodes past observations into a latent state
+$\mathbf{h}_t$. MLP heads produce the predictive mean and an initial low-rank-plus-diagonal (LRD) covariance. The temporal kernel
+mixture $\mathbf{C}_t$ and graph-based spatial factor covariance $\boldsymbol{G}_t$ are combined into a Kronecker batch covariance, which enables inference-time residual refinement and yields calibrated predictions.}
+\label{fig2}
+\end{figure}
+
+\section{Methodology}
+We pose our probabilistic auto-regressive formulation in Section 3.1, then describe the temporal and spatial error correlation modeling in Sections 3.2 and 3.3. Section 3.4 introduces theoretical performance figures for curvature aware rewiring. Section 3.5 details the sampling performed by the proposed method at inference time. See Fig.~\ref{fig2} for an visual representation of our approach. 
+\label{sec:method}
+
+\subsection{Probabilistic Autoregressive Formulation}
+\label{ssec:prob-ar}
+
+Let $\mathbf{x}_t = [x_{1,t},\ldots,x_{N,t}]^\top \in \R^N$ denote the
+vector of multivariate time series variables at time step $t$, where $N$ is
+the number of spatially distributed nodes. The objective of probabilistic
+spatio-temporal forecasting is to estimate the joint conditional distribution
+$p(\mathbf{x}_{T+1:T+Q} \mid \mathbf{x}_{T-P+1:T};,
+    \mathbf{v}_{T-P+1:T+Q}),$
+given the observed history $\{\mathbf{x}_t\}_{t=1}^T$ and time-dependent
+covariates $\mathbf{v}_t$. Our methodology employs a multivariate Gaussian distribution as the
+probabilistic head, decomposing the time series variable as
+$\mathbf{x}_t = \boldsymbol{\mu}_t + \boldsymbol{\eta}_t$, where
+$\boldsymbol{\eta}_t \sim \mathcal{N}(\mathbf{0}, \Sigma_t)$ represents
+the stochastic error component. To efficiently model the covariance matrix
+$\Sigma_t$ for large $N$, we adopt a low-rank-plus-diagonal parameterisation:
+\begin{equation}
+  \Sigma_t = \mathbf{L}_t\mathbf{L}_t^\top + \diag(\mathbf{d}_t),
+  \label{eq:lrd}
+\end{equation}
+where $\mathbf{L}_t \in \R^{N \times R}$ ($R \ll N$) and
+$\mathbf{d}_t \in \R^N_+$.
+
+\subsection{Temporal Error Correlation Modeling}
+\label{ssec:temporal}
+
+To capture spatio-temporal dependencies, we extend error modelling over a
+finite horizon $D$ by stacking residuals:
+$\boldsymbol{\eta}_t^{\mathrm{bat}} = \vec(\boldsymbol{\eta}_{t-D+1:t}) \in
+\R^{DN}$. The joint distribution is:
+\begin{equation}
+  \boldsymbol{\eta}_t^{\mathrm{bat}} \sim
+  \mathcal{N}(\mathbf{0}, \Sigma_t^{\mathrm{bat}}),
+  \quad
+  \Sigma_t^{\mathrm{bat}} =
+    \mathbf{L}_t^{\mathrm{bat}}
+    (\mathbf{C}_t \otimes \mathbf{G}_t)
+    (\mathbf{L}_t^{\mathrm{bat}})^\top
+    + \diag(\mathbf{d}_t^{\mathrm{bat}}),
+  \label{eq:batch-cov}
+\end{equation}
+where $\mathbf{L}_t^{\mathrm{bat}} = \mathrm{blkdiag}(\mathbf{L}_{t-D+1},
+\ldots, \mathbf{L}_t) \in \R^{DN \times DR}$, $\mathbf{C}_t \in \R^{D \times D}$
+captures temporal correlation, and $\mathbf{G}_t \in \R^{R \times R}$ encodes
+spatial factor covariance informed by the graph structure.
+
+The temporal correlation matrix $\mathbf{C}_t$ is parameterised as a dynamic
+kernel mixture, similar to TCVAR:
+\begin{equation}
+  \mathbf{C}_t = \sum_{m=1}^M w_{m,t} \mathbf{K}_m,
+  \quad w_{m,t} \ge 0,\quad \sum_{m=1}^M w_{m,t} = 1,
+  \label{eq:kernel-mix}
+\end{equation}
+where $\{\mathbf{K}_m\}$ are fixed Positive Semi-Definite (PSD) kernel
+matrices (e.g., squared exponential with varying length scales) and
+$\{w_{m,t}\}$ are time-varying mixture weights learned through a softmax
+network.
+
+\subsection{Spatial Correlation Modeling}
+\label{sec:spatial}
+
+Motivated by the limitations of existing models such as TCVAR in capturing spatial error propagation, Teger proposes a novel paradigm for spatial error propagation that makes use of a stochastic curvature-aware reweighting 
+approach applicable for ST networks.
+
+
+
+\subsubsection{Dynamic Curvature-Aware Spatial Correlation}
+\label{sssec:curvature}
+
+To incorporate spatial dependencies inherent in transportation networks, we introduce a dynamic graph  $\calG_t = (\mathcal{V}, \calE_t, \mathbf{A}_t)$. We consider eigenvalues of the graph Laplacian to be ordered as: $\lambda_n \ge \lambda_{n-1} \ge ... \ge \lambda_1$.
+A critical challenge in cross-correlation methods applied to transportation
+systems is the \emph{oversquashing} phenomenon, where information flow
+between distant nodes becomes exponentially attenuated through bottleneck
+edges with highly negative discrete curvature. Based on the theorem from ~\cite{topping2022understandingoversquashingbottlenecksgraphs}, edges $(i,j)$ with Balanced
+Forman curvature $\kappa(i,j) \le -2+\delta$ (for small $\delta > 0$) act as
+information bottlenecks, severely limiting the influence propagation from
+node $i$ to its extended neighborhood.
+To mitigate this, we propose the curvature-aware spatial precision matrix
+rewiring algorithm (Algorithm~\ref{alg:rewiring}).
+
+
+\begin{algorithm}[t]
+\caption{Curvature-Aware Spatial Precision Matrix Rewiring}
+\label{alg:rewiring}
+\begin{algorithmic}[1]
+  \State \textbf{Input:} Batch adjacency matrices $\{\bar{\mathbf{A}}_{b,t}\}_{b=1}^B$,
+    fixed jitter $\sigma_{\min}>0$
+  \State \textbf{Learned parameters:} $\kappa_0\in\mathbb{R}$, $\tau>0$, $\lambda>0$,
+    $\alpha>0$, $\beta\ge0$, $\mathbf{P}\in\mathbb{R}^{N\times R}$
+    \quad\Comment{All trained end-to-end via back-prop}
+  \State \textbf{Output:} Spatial factor covariance $\mathbf{G}_t\in\mathbb{R}^{R\times R}$
+  \State $\mathbf{A}_t \leftarrow \frac{1}{B}\sum_{b=1}^B \bar{\mathbf{A}}_{b,t}$
+  \State $\mathbf{W}_t \leftarrow \tfrac{1}{2}(\mathbf{A}_t + \mathbf{A}_t^\top)$
+  \For{each edge $(i,j)$ in $\mathbf{W}_t$}
+    \State Compute Balanced Forman curvature $\kappa_{ij,t}$
+    \State $b_{ij,t} \leftarrow \operatorname{softplus}(\tau(\kappa_0 - \kappa_{ij,t}))$
+  \EndFor
+  \For{each edge $(i,j)$ in $\mathbf{W}_t$}
+    \State $W'_{ij,t} \leftarrow W_{ij,t}(1 + \lambda\, b_{ij,t})$
+  \EndFor
+  \State Compute graph Laplacian $\mathbf{L}'_t$ from $\mathbf{W}'_t$
+  \State $\hat{\mathbf{P}} \leftarrow \operatorname{colnorm}(\mathbf{P})$;\quad
+    $\mathbf{L}_t^{(R)} \leftarrow \hat{\mathbf{P}}^\top \mathbf{L}'_t \hat{\mathbf{P}}$
+  \State $\mathbf{Q}_t \leftarrow (\alpha +\sigma_{\min}) \mathbf{I}_R + \beta\mathbf{L}_t^{(R)}$;\quad
+    $\mathbf{G}_t \leftarrow \mathbf{Q}_t^{-1}$
+  \State \Return $\mathbf{G}_t$
+\end{algorithmic}
+\end{algorithm}
+
+
+\begin{proposition}[Validity of Reweighted Covariance]
+\label{prop:validity}
+Assume the reweighted adjacency $\mathbf{W}'_t$ is symmetric and entrywise
+nonnegative. Then:
+\begin{enumerate}
+  \item[(i)] The graph Laplacian $\mathbf{L}'_t$ of $\mathbf{W}'_t$ is PSD.
+  \item[(ii)] For any $\mathbf{P} \in \R^{N \times R}$, the projected matrix
+    $\mathbf{L}_t^{(R)} = \mathbf{P}^\top \mathbf{L}'_t \mathbf{P}$ is PSD.
+  \item[(iii)] For $\alpha > 0$, $\beta \ge 0$, and $\sigma_{\min} > 0$, the
+    precision matrix $\mathbf{Q}_t = \alpha\mathbf{I}_R
+    + \beta\mathbf{L}_t^{(R)} + \sigma_{\min}\mathbf{I}_R$ is symmetric
+    positive definite, and hence $\mathbf{G}_t = \mathbf{Q}_t^{-1}$ is a
+    valid covariance matrix.
+\end{enumerate}
+\end{proposition}
+
+The proof is given in Appendix~\ref{app:prop1}.  Proposition~\ref{prop:validity}
+establishes only that the construction yields a well-defined covariance matrix. We now provide a theoretical justification connecting the curvature-aware rewiring to oversquashing alleviation, long-range
+information flow, and calibration improvement.
+
+% ==========================================================================
+\subsection{Theoretical Analysis of Curvature-Aware Reweighting}
+\label{ssec:theory}
+
+Throughout this section we work with the \emph{unnormalised} graph Laplacian
+$\mathbf{L} = \mathbf{D} - \mathbf{W}$ unless explicitly stated otherwise,
+where $\mathbf{D} = \diag(\mathbf{W}\mathbf{1})$ is the degree matrix.  All
+graphs are assumed to be undirected, weighted, and connected.  We write
+$\mathbf{A} \succeq \mathbf{B}$ to denote the L\"{o}wner (positive
+semidefinite) partial order.
+
+% ------------------------------------------------------------------
+\subsubsection{Direction 1: Spectral Gap Improvement}
+\label{sssec:spectral-gap}
+
+\begin{lemma}[Laplacian Monotonicity]
+\label{lem:laplacian-monotone}
+Let $\mathbf{W}, \Delta\mathbf{W} \in \R^{N\times N}$ be symmetric,
+entrywise non-negative matrices with corresponding unnormalised Laplacians
+$\mathbf{L}$ and $\mathbf{L}_{\Delta}$. Then
+\begin{equation}
+  \mathbf{L}_{\mathbf{W}+\Delta\mathbf{W}}
+    = \mathbf{L}_{\mathbf{W}} + \mathbf{L}_{\Delta\mathbf{W}},
+  \quad
+  \mathbf{L}_{\Delta\mathbf{W}} \succeq \mathbf{0}.
+  \label{eq:lap-decomp}
+\end{equation}
+\end{lemma}
+
+
+
+
+
+\begin{proposition}[Spectral Gap Monotonicity]
+\label{prop:spectral-gap}
+Let $\mathbf{L}_t = \diag(\mathbf{W}_t) -
+\mathbf{W}_t = \mathbf{D}_t - \mathbf{W}_t$ be the unnormalised
+Laplacian of the original graph and $\mathbf{L}'_t$ the Laplacian of the
+reweighted graph $\mathbf{W}'_t$ obtained via Algorithm~\ref{alg:rewiring}. Then:
+\begin{enumerate}
+  \item[(i)] $\mathbf{L}'_t \succeq \mathbf{L}_t$ in L\"owner order sense.
+  % \item[(ii)] $\lambda_{n-1}(\mathbf{L}'_t) \ge \lambda_{n-1}(\mathbf{L}_t)$, where $\lambda_{n-1}(\mathbf{L}_t)$ is the second largest eigenvalue of $\mathbf{L}_t$.
+   \item[(ii)] 
+ %   Let $\mathcal{E}_2(\mathbf{L}_t)$ denote the eigenspace
+ % associated with $\lambda_2(\mathbf{L}_t)$.
+ If $\mathbf{L}_{\Delta W_t}$ is positive definite 
+then $\lambda_k(\mathbf{L}'_t) >  \lambda_k(\mathbf{L}_t)$ for all $k$, that is, the inequality is strict.
+\end{enumerate}
+\end{proposition}
+
+
+
+
+\begin{remark}
+\label{rem:normalised-lap}
+Proposition~\ref{prop:spectral-gap} is stated for the \emph{unnormalised}
+Laplacian $\mathbf{L} = \mathbf{D} - \mathbf{W}$, which is the object
+directly used in Algorithm~\ref{alg:rewiring}.  An analogous result for the
+\emph{normalised} Laplacian $\tilde{\mathbf{L}} =
+\mathbf{D}^{-1/2}\mathbf{L}\mathbf{D}^{-1/2}$ requires more care because
+normalisation by the (changing) degree matrix does not preserve the L\"{o}wner
+order; we leave this extension to future work.
+\end{remark}
+
+% ------------------------------------------------------------------
+\subsubsection{Direction 2: Effective Resistance and Long-Range Information Flow}
+\label{sssec:eff-res}
+
+\begin{corollary}[Improved Scaled Kirchhoff Index]
+\label{cor:total-eff-res}
+Inspired from LASER~\cite{barbero2024laser}, define $
+\mathcal{K}(\mathbf{W_t})
+\triangleq
+\sum_{k=2}^N {1/\lambda_k(\mathbf{L}_t)}.
+$
+Then
+\[
+\mathcal{K}(\mathbf{W}'_t) \le \mathcal{K}(\mathbf{W}_t).
+\]
+\end{corollary}
+
+We show numerically that our reweighting leads to improved scaled Kirchhoff index in Table~\ref{alg:rewiring}.
+
+
+\subsubsection{Direction 3: Local Bottleneck Alleviation}
+\label{sssec:oversquashing}
+
+\begin{definition}[Cut Conductance]
+\label{def:cheeger}
+Inspired from LASER~\cite{barbero2024laser}, for a nonempty proper subset $S\subset \mathcal{V}$, define ~\cite{barbero2024laser}:
+\[
+\phi_{\mathbf W_t}(S)
+=
+\frac{\mathrm{cut}(S;\mathbf W_t)}
+     {\min\{\mathrm{vol}(S;\mathbf W_t),\mathrm{vol}(\mathcal V\setminus S;\mathbf W_t)\}},
+\]
+where
+\[
+\mathrm{cut}(S;\mathbf W_t)
+=
+\sum_{i\in S,\; j\notin S} w_{ij,t},
+\qquad
+\mathrm{vol}(S;\mathbf W_t)
+=
+\sum_{i\in S}\sum_j w_{ij,t}.
+\]
+The Cheeger constant is defined as:
+\[
+h(\mathcal G_t)=\min_{\emptyset\neq S\subsetneq\mathcal V}\phi_{\mathbf W_t}(S).
+\]
+\end{definition}
+
+\begin{proposition}[Local Bottleneck Alleviation]
+\label{prop:oversquashing}
+Inspired from LASER~\cite{barbero2024laser}, let $S\subset \mathcal V$ be a nontrivial cut. Assume the rewiring changes only
+edges crossing the boundary $\partial S$, i.e.
+\[
+w'_{ij,t}\ge w_{ij,t}
+\quad \text{for } i\in S,\; j\notin S,
+\qquad
+w'_{ij,t}=w_{ij,t}
+\quad \text{otherwise.}
+\]
+Then
+$
+\phi_{\mathbf W'_t}(S)\ge \phi_{\mathbf W_t}(S),
+$
+with strict inequality if at least one crossing edge is strengthened.
+Therefore, if $S$ is a curvature-identified bottleneck cut, the rewiring
+locally alleviates that bottleneck.
+\end{proposition}
+
+
+We numerically show that our reweighting method improves the local bottleneck conductance in Table~\ref{alg:rewiring}. 
+
+\begin{remark}[Scope of Local Bottleneck alleviation]
+\label{rem:bfc-cheeger}
+The statement $\phi_{\mathbf W'_t}(S)\ge \phi_{\mathbf W_t}(S)$ holds true for any cut $S$, $S\subsetneq\mathcal V$, $S\neq\emptyset$. Proposition~\ref{prop:oversquashing}
+is a graph-theoretic
+statement that is needed for oversquashing: negatively curved edges
+indicate bottlenecks, and strengthening the crossing edges of such a bottleneck
+increases its conductance. We note that proposition~\ref{prop:oversquashing} does not claim global optimality; finding the set $S$ that provides a global optimum is not guaranteed by this proposition. Numerical results illustrating $\phi_{\mathbf W'_t}(S)$ and $ \phi_{\mathbf W_t}(S)$ for various $S$ is given in the experimental section.
+\end{remark}
+
+
+\subsubsection{Direction 4: Probabilistic Calibration and Marginal CRPS}
+\label{sssec:crps}
+
+
+
+We evaluate our model performance using the Continuous Ranked Probability Score (CRPS) metric, defined as: $\small{
+\mathrm{CRPS}(F, y) = \mathbb{E} ||X - y|| + \frac{1}{2} \mathbb{E} ||X - X'||}$ where $F(x)$ is the cumulative distribution function (CDF) of the forecasted distribution, $y$ is the observed value, $X,X'$ are sampled from $F$.  Let $\mathrm{CRPS}_{\mathrm{sum}}$ be the average sum of all marginal CRPS values computed per variate.   We use $\mathrm{CRPS}_{\mathrm{sum}}$ to compare the performance of the proposed method against the state of the art. 
+
+
+\subsection{Inference-Time Residual Refinement}
+\label{ssec:refinement}
+
+This section details the sampling performed by the proposed method at inference time.  Direct autoregressive rollout under the batch Gaussian model may
+underestimate volatility or propagate early-step errors. To mitigate this,
+we introduce a refinement step that draws next-step residual samples from the
+Gaussian conditional induced by the model covariance over the window
+$\boldsymbol{\eta}_{t-D+2:t+1}$.
+
+\paragraph{Block Partition.}
+At forecast time $t+1$, we follow the sampling from the gaussian posterior same as TCVAR\cite{zheng2024multivariateprobabilistictimeseries}. Our sampled forecast take the spatial error propagation into account.
+
+
+\paragraph{Node-Wise Volatility Scaling.}
+The limitation of TCVAR is that it does not capture local volatilies. To overcome this limitation, we propose node-wise volatility scaling. Conditional covariance $\Sigma_{\mathrm{cond},t+1}$ in Eq.~(9) already contains both
+marginal uncertainty and spatial dependence in the original data units. Therefore, directly
+multiplying a Cholesky factor of $\Sigma_{\mathrm{cond},t+1}$ by an additional empirical
+volatility scale may double-count marginal variance. To avoid this, we separate the conditional
+covariance into node-wise marginal scales and a dimensionless conditional correlation matrix. Let
+\[
+S_{\mathrm{cond},t+1}
+=
+\operatorname{diag}\left(
+\sqrt{(\Sigma_{\mathrm{cond},t+1})_{11}},
+\ldots,
+\sqrt{(\Sigma_{\mathrm{cond},t+1})_{NN}}
+\right),
+\]
+and define the corresponding conditional correlation matrix
+\[
+R_{\mathrm{cond},t+1}
+=
+S_{\mathrm{cond},t+1}^{-1}
+\Sigma_{\mathrm{cond},t+1}
+S_{\mathrm{cond},t+1}^{-1}.
+\]
+Here, $R_{\mathrm{cond},t+1}$ is dimensionless and captures the spatial dependence structure
+of the conditional residual distribution.
+
+To adapt the marginal scale to recent local volatility, we maintain for each node $i$ an
+exponential moving average of squared one-step residuals. Let
+\[
+r_{i,t}=x_{i,t}-\mu_{i,t},
+\]
+and define
+\[
+s_{i,t}^{2}
+=
+\rho s_{i,t-1}^{2}
++
+(1-\rho) r_{i,t}^{2},
+\qquad
+\rho \in [0,1).
+\]
+Thus, $s_{i,t}^{2}$ is an empirical estimate of the recent residual variance at node $i$,
+not a log-variance. We collect these estimates in the diagonal matrix
+\[
+D_t
+=
+\operatorname{diag}(s_{1,t}^{2},\ldots,s_{N,t}^{2}).
+\]
+Let $R_{\mathrm{cond},t+1}^{1/2}$ denote any matrix square root satisfying
+\[
+R_{\mathrm{cond},t+1}^{1/2}
+\left(R_{\mathrm{cond},t+1}^{1/2}\right)^{\top}
+=
+R_{\mathrm{cond},t+1}.
+\]
+The volatility-adapted refined residual sample is then given by
+\[
+\tilde{\eta}^{\mathrm{ref}}_{t+1}
+=
+\mu_{\mathrm{cond},t+1}
++
+D_t^{1/2}
+R_{\mathrm{cond},t+1}^{1/2}
+\xi_{t+1},
+\qquad
+\xi_{t+1}\sim\mathcal{N}(0,I_N).
+\tag{10}
+\]
+This construction preserves the spatial correlation structure learned by the conditional covariance
+while replacing its marginal scale with a recent node-wise volatility estimate.
+
+\paragraph{Training Objective. }
+\label{ssec:training}
+
+All parameters are optimized jointly by minimizing the negative log-likelihood
+(NLL) under the batch Gaussian model:
+\begin{equation}
+  \mathcal{L}
+    = -\log p(\boldsymbol{\eta}_t^{\mathrm{bat}})
+    = \frac{DN}{2}\log(2\pi)
+      + \frac{1}{2}\log|\Sigma_t^{\mathrm{bat}}|
+      + \frac{1}{2}(\boldsymbol{\eta}_t^{\mathrm{bat}})^\top
+          (\Sigma_t^{\mathrm{bat}})^{-1}
+          \boldsymbol{\eta}_t^{\mathrm{bat}}.
+  \label{eq:nll}
+\end{equation}
+Tractable evaluation exploits the Woodbury identity applied to the Kronecker
+structure, reducing the dominant inversion cost from $\mathcal{O}((DN)^3)$
+to $\mathcal{O}(D^3 + R^3 + DNR^2)$.
+
+
+\section{Experiments}
+To demonstrate the applicability of our method, Section 4.1 introduces the dataset and the baselines used for comparison. Sections 4.2 and 4.3 describe the graph construction of our approach and present the comparative results. Sections 4.4 and 4.5 further examine model interpretability and report the results of an ablation study.
+\label{sec:experiments}
+
+\subsection{Datasets and Baselines}
+\label{ssec:datasets}
+To assess its robustness across different scenarios, we test Teger on four real-world traffic datasets described in
+Table~\ref{tab:datasets}, and 4 backbones with
+diagonal Gaussian likelihoods. 
+Specifically, the 4 backbones are the (i) Long Short-Term Memory networks~\cite{salinas2019highdimensional} (LSTM) with diagonal Gaussian likelihood, serving as a fundamental sequential modeling baseline.; (ii) the standard transformer~\cite{vaswani2023attention} architecture adapted for time series forecasting with point-wise attention and probabilistic output layers; (iii) the \textbf{xLSTM~\cite{beck2024xlstm}}, an evolution of the traditional LSTM designed to overcome its limitations in scaling and memory capacity; and (iv) the \textbf{MTGNN}\cite{10.1145/3394486.3403118}, alternating use of graph convolution and temporal convolution modules. We include this baseline to address the possibility that gains may come from injecting spatial structure rather than from the proposed curvature-aware covariance mechanism.
+We compare Teger against a naive approach, which refers to raw predictions from the backbone without any temporal correlation modeling; and TCVAR~\cite{zheng2024multivariateprobabilistictimeseries}
+which models temporal error correlations but not spatial ones. Additionally, we compare Teger with a state-of-the-art rewiring method, LASER~\cite{barbero2024laser}, which inserts edges via a sequence of augmented snapshots. A chronological 70/10/20\% split is applied to all datasets. The graph construction is detailed in Appendix~\ref{graph_cons}.
+
+
+
+
+
+\subsection{Results}
+\label{ssec:results}
+
+Table~\ref{tab:crps} presents CRPS$_{\mathrm{sum}}$ results. Teger consistently outperforms baselines, TCVAR~\cite{zheng2024multivariateprobabilistictimeseries}, and LASER~\cite{barbero2024laser} across most forecasting horizons, with Teger achieving the best results in most settings. The full results with STDs are reported in Table~\ref{tab:xlstm-statistical-results}.
+To demonstrate the effectiveness of our model, from Fig.~\ref{fig3} we can conclude that it is feasible to reduce prediction error in autoregressive models across future horizons by properly modeling spatial error propagation. Quantitatively, after modeling spatial error propagation and refining the forecasts, we improve the prediction quality of the TCVAR~\cite{zheng2024multivariateprobabilistictimeseries} model by reducing nearly 30\% of the MAE error magnitude. The hyperparameters, runtime, and memory analysis are detailed in Appendix~\ref{sec:hyperparameter_search}.
+
+
+\begin{table}[t]
+\centering
+\caption{$\mathrm{CRPS}_{\mathrm{sum}}{\downarrow}$ results across 4 datasets. Best result per row in \textbf{bold}.}
+\label{tab:crps}
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{llrrrrrrrrrrrr}
+\toprule
+& & \multicolumn{4}{c}{15 min (3-step)}
+  & \multicolumn{4}{c}{30 min (6-step)}
+  & \multicolumn{4}{c}{60 min (12-step)} \\
+\cmidrule(lr){3-6}\cmidrule(lr){7-10}\cmidrule(lr){11-14}
+Dataset & Backbone & naïve & TCVAR & LASER & Teger
+                   & naïve & TCVAR & LASER & Teger
+                   & naïve & TCVAR & LASER & Teger \\
+\midrule
+% \multirow{4}{*}{PeMS03} & LSTM & 0.0475 & 0.0405 & \textbf{0.0377} & 0.0383 & 0.0476 & 0.0419 & \textbf{0.0389} & 0.0401 & 0.0503 & 0.0491 & 0.0431 & \textbf{0.0401} \\
+%  & Transformer & 0.0457 & 0.0355 & 0.0309 & \textbf{0.0292} & 0.0473 & 0.0371 & 0.0323 & \textbf{0.0305} & 0.0490 & 0.0386 & 0.0335 & \textbf{0.0316} \\
+%  & xLSTM & 0.0448 & 0.0390 & 0.0343 & \textbf{0.0316} & 0.0464 & 0.0405 & 0.0357 & \textbf{0.0328} & 0.0479 & 0.0420 & 0.0370 & \textbf{0.0341} \\
+%  & MTGNN & 0.0536 & 0.0465 & \textbf{0.0405} & 0.0416 & 0.0556 & \textbf{0.0446} & 0.0471 & 0.0449 & 0.0543 & 0.0543 & 0.0503 & \textbf{0.0499} \\
+% \midrule
+% \multirow{4}{*}{PeMS04} & LSTM & 0.0229 & 0.0197 & 0.0158 & \textbf{0.0134} & 0.0242 & 0.0210 & 0.0170 & \textbf{0.0144} & 0.0255 & 0.0221 & 0.0179 & \textbf{0.0152} \\
+%  & Transformer & 0.0218 & 0.0156 & 0.0134 & \textbf{0.0115} & 0.0231 & 0.0171 & 0.0145 & \textbf{0.0125} & 0.0243 & 0.0178 & 0.0154 & \textbf{0.0133} \\
+%  & xLSTM & 0.0168 & 0.0155 & 0.0126 & \textbf{0.0112} & 0.0180 & 0.0166 & 0.0135 & \textbf{0.0120} & 0.0191 & 0.0177 & 0.0143 & \textbf{0.0128} \\
+%  & MTGNN & 0.0259 & 0.0294 & 0.0232 & \textbf{0.0155} & 0.0275 & 0.0241 & 0.0242 & \textbf{0.0175} & 0.0259 & 0.0272 & \textbf{0.0236} & 0.0236 \\
+% \midrule
+% \multirow{4}{*}{PeMS07} & LSTM & 0.0968 & 0.0956 & 0.0893 & \textbf{0.0871} & 0.0972 & 0.0949 & 0.0933 & \textbf{0.0886} & 0.1001 & 0.0989 & 0.0949 & \textbf{0.0922} \\
+%  & Transformer & 0.0957 & 0.0932 & 0.0906 & \textbf{0.0871} & 0.0974 & 0.0949 & 0.0921 & \textbf{0.0886} & 0.0991 & 0.0966 & 0.0938 & \textbf{0.0901} \\
+%  & xLSTM & 0.0941 & 0.0907 & 0.0897 & \textbf{0.0864} & 0.0958 & 0.0922 & 0.0912 & \textbf{0.0878} & 0.0975 & 0.0938 & 0.0928 & \textbf{0.0891} \\
+%  & MTGNN & 0.1064 & 0.1004 & 0.0983 & \textbf{0.0952} & 0.1006 & 0.0957 & 0.1006 & \textbf{0.0945} & 0.1058 & 0.1001 & 0.1004 & \textbf{0.0946} \\
+% \midrule
+% \multirow{4}{*}{Brussels} & LSTM & 0.1455 & 0.0863 & 0.0868 & \textbf{0.0809} & 0.1487 & 0.0894 & 0.0890 & \textbf{0.0811} & 0.1512 & 0.0917 & 0.0911 & \textbf{0.0842} \\
+%  & Transformer & 0.1668 & 0.0786 & 0.0769 & \textbf{0.0668} & 0.1671 & 0.0793 & 0.0794 & \textbf{0.0692} & 0.1717 & 0.0817 & 0.0817 & \textbf{0.0695} \\
+%  & xLSTM & 0.1448 & 0.0748 & 0.0751 & \textbf{0.0591} & 0.1473 & 0.0801 & 0.0820 & \textbf{0.0611} & 0.1496 & 0.0819 & 0.0811 & \textbf{0.0619} \\
+%  & MTGNN & 0.1489 & 0.0957 & 0.0931 & \textbf{0.0891} & 0.1527 & 0.0958 & 0.0951 & \textbf{0.0840} & 0.1579 & 0.1013 & 0.0999 & \textbf{0.0897} \\
+\multirow{4}{*}{PeMS03} & LSTM & 0.0475 & 0.0405 & 0.0387 & \textbf{0.0383} & 0.0476 & 0.0419 & \textbf{0.0397} & 0.0401 & 0.0503 & 0.0491 & 0.0436 & \textbf{0.0401} \\
+ & Transformer & 0.0457 & 0.0355 & 0.0313 & \textbf{0.0292} & 0.0473 & 0.0371 & 0.0329 & \textbf{0.0305} & 0.0490 & 0.0386 & 0.0340 & \textbf{0.0316} \\
+ & xLSTM & 0.0448 & 0.0390 & 0.0351 & \textbf{0.0316} & 0.0464 & 0.0405 & 0.0360 & \textbf{0.0328} & 0.0479 & 0.0420 & 0.0377 & \textbf{0.0341} \\
+ & MTGNN & 0.0539 & 0.0491 & 0.0449 & \textbf{0.0428} & 0.0509 & 0.0422 & \textbf{0.0403} & 0.0445 & 0.0583 & 0.0541 & 0.0496 & \textbf{0.0483} \\
+\midrule
+\multirow{4}{*}{PeMS04} & LSTM & 0.0229 & 0.0197 & 0.0165 & \textbf{0.0134} & 0.0242 & 0.0210 & 0.0173 & \textbf{0.0144} & 0.0255 & 0.0221 & 0.0184 & \textbf{0.0152} \\
+ & Transformer & 0.0218 & 0.0156 & 0.0136 & \textbf{0.0115} & 0.0231 & 0.0171 & 0.0150 & \textbf{0.0125} & 0.0243 & 0.0178 & 0.0156 & \textbf{0.0133} \\
+ & xLSTM & 0.0168 & 0.0155 & 0.0135 & \textbf{0.0112} & 0.0180 & 0.0166 & 0.0140 & \textbf{0.0120} & 0.0191 & 0.0177 & 0.0149 & \textbf{0.0128} \\
+ & MTGNN & 0.0301 & 0.0255 & 0.0182 & \textbf{0.0142} & 0.0335 & 0.0301 & 0.0220 & \textbf{0.0190} & 0.0310 & 0.0275 & 0.0258 & \textbf{0.0184} \\
+\midrule
+\multirow{4}{*}{PeMS07} & LSTM & 0.0968 & 0.0956 & 0.0896 & \textbf{0.0871} & 0.0972 & 0.0949 & 0.0940 & \textbf{0.0886} & 0.1001 & 0.0989 & 0.0958 & \textbf{0.0922} \\
+ & Transformer & 0.0957 & 0.0932 & 0.0914 & \textbf{0.0871} & 0.0974 & 0.0949 & 0.0926 & \textbf{0.0886} & 0.0991 & 0.0966 & 0.0946 & \textbf{0.0901} \\
+ & xLSTM & 0.0941 & 0.0907 & 0.0903 & \textbf{0.0864} & 0.0958 & 0.0922 & 0.0916 & \textbf{0.0878} & 0.0975 & 0.0938 & 0.0936 & \textbf{0.0891} \\
+ & MTGNN & 0.1052 & 0.1013 & 0.0921 & \textbf{0.0874} & 0.1012 & \textbf{0.0955} & 0.1013 & 0.0978 & 0.1098 & 0.1023 & 0.1026 & \textbf{0.0964} \\
+\midrule
+\multirow{4}{*}{Brussels} & LSTM & 0.1455 & 0.0863 & 0.0871 & \textbf{0.0809} & 0.1487 & 0.0894 & 0.0895 & \textbf{0.0811} & 0.1512 & 0.0917 & 0.0921 & \textbf{0.0842} \\
+ & Transformer & 0.1668 & 0.0786 & 0.0779 & \textbf{0.0668} & 0.1671 & 0.0793 & 0.0794 & \textbf{0.0692} & 0.1717 & 0.0817 & 0.0821 & \textbf{0.0695} \\
+ & xLSTM & 0.1448 & 0.0748 & 0.0752 & \textbf{0.0591} & 0.1473 & 0.0801 & 0.0828 & \textbf{0.0611} & 0.1496 & 0.0819 & 0.0821 & \textbf{0.0619} \\
+ & MTGNN & 0.1471 & 0.0918 & 0.0953 & \textbf{0.0853} & 0.1507 & 0.0987 & 0.0967 & \textbf{0.0832} & 0.1535 & 0.0971 & 0.0970 & \textbf{0.0935} \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+
+\begin{table}[t]
+\centering
+\caption{Comparison of graph measures before and after Algorithm~\ref{alg:rewiring}(in \%).}
+\label{tab:graph_measures}
+\resizebox{0.5\textwidth}{!}{
+\begin{tabular}{llccc}
+\hline
+Dataset & Backbone &  $\mathcal{K}(\mathbf{W}_t)/\mathcal{K}(\mathbf{W}'_t)$ & $\lambda'_{n-1}/\lambda_{n-1}$ & $\phi_{\mathbf W'_t}(S)/\phi_{\mathbf W_t}(S)$ \\
+\hline
+\multirow{4}{*}{Brussels}
+& LSTM        & 34.1 & 37.1 & 33.9 \\
+& Transformer & 32.4 & 36.3 & 33.6 \\
+& xLSTM       & 30.6 & 34.2 & 32.5 \\
+& MTGNN       & 20.1 & 23.3 & 29.8 \\
+\hline
+\multirow{4}{*}{PeMS04}
+& LSTM        & 22.6 & 23.6 & 22.9 \\
+& Transformer & 19.1 & 18.8 & 17.6 \\
+& xLSTM       & 17.3 & 15.1 & 14.2 \\
+& MTGNN       & 13.4 & 14.3 & 13.8 \\
+\hline
+\multirow{4}{*}{PeMS07}
+& LSTM        & 9.1 & 9.3 & 8.9 \\
+& Transformer & 8.9 & 8.3 & 7.9 \\
+& xLSTM       & 7.1 & 6.9 & 6.6 \\
+& MTGNN       & 6.8 & 6.3 & 6.8 \\
+\hline
+\multirow{4}{*}{PeMS03}
+& LSTM        & 20.6 & 21.2 & 21.9 \\
+& Transformer & 20.1 & 19.3 & 20.7 \\
+& xLSTM       & 18.6 & 16.5 & 17.1 \\
+& MTGNN       & 15.3 & 15.6 & 15.9 \\
+\hline
+\end{tabular}}
+\end{table}
+
+% ==========================================================================
+
+\subsection{Model Interpretability}
+\label{sec:brussels_usecase}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.7\linewidth]{figs/usecase/ablation_rev1.png}
+\caption{Analysis of a rewired subgraph in a congested area of Brussels under a sampled inference via  (a.) our model (Teger) and (b.) LASER~\cite{barbero2024laser}, illustrating the physical consistency of the curvature-based graph rewiring of our model (Teger) compared to LASER~\cite{barbero2024laser}. Red segments indicate congested roads, and stop signs denote partial road closures. Data source: Google Maps.}
+\label{fig_casestudy}
+\end{figure}
+
+
+Quantitatively experiments across 48 (dataset, backbone, horizon) configurations in Table~\ref{tab:crps} show that Teger achieves the best CRPS in 42 cases. LASER outperforms Teger primarily on PeMS03 at longer horizons. Notably, the gap is largest on the Brussels dataset (Teger improves CRPS by 25.3\% over LASER~\cite{barbero2024laser}), where the road network is densest and the most physically constrained. Figure~\ref{fig_casestudy} illustrates why this gap appears on road graphs specifically: LASER's added edges (e.g., N3–N4) do not correspond to physically realized routes, introducing covariance pathways that are not mediated by the underlying transportation infrastructure. Teger's reweighting preserves the correspondence between graph topology and physical road structure, which we hypothesize accounts for the quantitative advantage on dense urban networks.
+
+\paragraph{Use Case: Teger's interpretability in Brussels dataset. }
+This section provides a qualitative illustration of the curvature-aware rewiring mechanism applied to the Brussels traffic sensor network under the xLSTM backbone (Teger). The goal is to examine whether the edges that receive the strongest covariance amplification are geographically consistent with locations that plausibly exhibit correlated sensor errors. This subsection constitutes a visualization exercise, not a quantitative validation against independent ground-truth bottleneck labels; a rigorous validation against incident logs, empirical residual cross-correlations, or measured queue spillback data is left for future work. We have a similar observations in the cities with different topologies. Network description is detailed in Appendix~\ref{Brussels_des}.
+Similar observations as above have been made on cities with different graph topologies. 
+
+\paragraph{Physical interpretation and limitations.}\label{limitation}
+The curvature mechanism selectively amplifies covariance coupling along sensor
+pairs that are in close proximity but share few common alternative sensor
+neighbours — a structural signature consistent with corridor-like sensor placements
+on long arterial segments. For such pairs, a disruption at one sensor (due to
+congestion, an incident, or roadworks) is more likely to produce statistically
+co-varying forecast residuals at the neighbouring sensor, because both observe the
+same traffic stream with little spatial diversification. The term \textit{rewired} denotes
+that the model has increased the covariance between those sensors; it does
+not imply causal traffic propagation, which would require independent validation
+against speed measurements or incident records.
+
+
+
+\paragraph{Ablation Study.}
+\label{sec:ablation}
+
+\begin{table}[t]
+\centering
+\caption{Ablation study on curvature-aware spatial correlation variants.}
+\label{tab:ablation-curvature}
+\resizebox{0.3\textwidth}{!}{
+\begin{tabular}{lcc}
+\toprule
+Variant & NLL$\downarrow$ & MAE$\downarrow$ \\
+\midrule
+No rewiring          & 72.21 & 8.21 \\
+- Volatility Modeling & 66.21 & 7.01 \\
++ Edge reweighting   & 58.21  & 5.91 \\
++ Latent projection (full) & \textbf{49.32}  & \textbf{4.98} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+As reported in Table~\ref{tab:ablation-curvature}, curvature-aware rewiring consistently improves over the standard graph
+formulation. These numerical results were obtained on PeMS378 data; similar findings are obtained on other datasets.
+Edge reweighting based on negative curvature alleviates
+information bottlenecks, leading to better long-range dependency modeling.
+The full formulation, including latent-space projection and precision matrix
+construction, yields the best performance, highlighting the importance of
+combining geometric insights with low-rank modelling.
+
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.6\linewidth]{figs/fig3_rev1.png}
+\caption{Analysis of spatial error propagation reduction for PeMS03 dataset. The top row shows the forecasts from the TCVAR~\cite{zheng2024multivariateprobabilistictimeseries} method, while the bottom row shows the results from Teger.}
+\label{fig3}
+\end{figure}
+
+
+\begin{figure}[h]
+    \centering
+    % --- First Row ---
+    \begin{subfigure}{0.32\textwidth}\includegraphics[width=\textwidth]{figs/results/1_results_5035.png}
+        \caption{\small TCVAR \cite{zheng2024multivariateprobabilistictimeseries}}
+        \label{fig4_a}
+        \end{subfigure}
+            \begin{subfigure}{0.32\textwidth}\includegraphics[width=\textwidth]{figs/results/2_results_4513.png}
+        \caption{\small Teger w/o volatility}
+        \label{fig4_b}
+        \end{subfigure}
+\begin{subfigure}{0.32\textwidth}\includegraphics[width=\textwidth]{figs/results/4_results_2538.png}
+        \caption{\small Teger (ours)}
+        \label{fig4_d}
+\end{subfigure}
+    \caption{Qualitative comparison of results forecasted by baseline and variants of Teger for the Brussels dataset, annotated by the corresponding MAE.}
+    \label{fig:qualitative_and_curvature}
+\end{figure}
+
+% ==========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented Teger, a probabilistic framework for multivariate time-series
+forecasting that explicitly models spatially correlated forecast errors via
+graph-structured covariances. We proposed a spatial
+component: a curvature-aware rewiring mechanism. 
+% We provided rigorous theoretical foundations:
+% Proposition~\ref{prop:spectral-gap} establishes that rewiring strictly
+% improves the Fiedler value of the unnormalized graph Laplacian;
+% Proposition~\ref{prop:spectral-gap} shows that rewiring cannot decrease the Fiedler value of the unnormalized graph Laplacian and gives a strict
+% improvement criterion; Proposition~\ref{prop:eff-res} shows that effective resistance decreases for all node pairs, with a strict decrease when a rewiring edge carries current between the pair; Proposition~\ref{prop:oversquashing} proves a local conductance increase for targeted bottleneck cuts, which is the graph-theoretic mechanism behind oversquashing alleviation; and Proposition~\ref{prop:crps} gives a correct sufficient condition for improved $\mathrm{CRPS}_{\mathrm{sum}}$, namely that the induced marginal standard deviations move toward their oracle values without overshooting.
+
+% ==========================================================================
+\bibliographystyle{plain}
+\bibliography{biblio}
+
+% ==========================================================================
+\appendix\label{appendix}
+
+\section{Motivation}\label{motiv}
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.9\linewidth}
+         \centering
+         \includegraphics[width=0.8\linewidth]{figs/fig1.pdf}
+         \caption{\small Motivation for modeling spatial error propagation in traffic forecasting. A multivariate time series (MVT) model generates traffic forecasts for multiple traffic cameras located on the intricate road network of Brussels, Belgium. Our model is designed to explicitly capture and refine predictions by accounting for correlated forecast uncertainties across the transportation network based on their spatial dependency.}
+    \label{fig:sub1}
+\end{subfigure}
+\begin{subfigure}[b]{0.9\linewidth}
+         \centering
+         \includegraphics[width=0.9\linewidth]{figs/fig1_b_rev4.png}
+         \caption{\small Empirical spatio-temporal covariance on the PeMS03 dataset is estimated from LSTM residuals of traffic speed forecasts. The results exhibit both contemporaneous spatial structure and cross-lag temporal persistence in the residuals, motivating the joint spatio-temporal covariance model introduced in Section~\ref{sssec:curvature}.}
+    \label{fig:sub2}
+\end{subfigure}
+\caption{Motivation of our work.}
+\label{fig:main}
+\end{figure}
+
+\section{Proofs}\label{proofs}
+
+\subsection{Proof of Proposition~\ref{prop:validity} (Validity of Rewired Covariance)}
+\label{app:prop1}
+
+\paragraph{Part (i).}
+The graph Laplacian of any symmetric, entrywise nonnegative matrix is PSD:
+$\mathbf{x}^\top \mathbf{L}'_t \mathbf{x} = \frac{1}{2}\sum_{i,j}
+W'_{ij,t}(x_i-x_j)^2 \ge 0$ for all $\mathbf{x} \in \R^N$.
+
+\paragraph{Part (ii).}
+For any $\mathbf{x} \in \R^R$,
+$\mathbf{x}^\top \mathbf{L}_t^{(R)} \mathbf{x}
+= (\mathbf{Px})^\top \mathbf{L}'_t (\mathbf{Px}) \ge 0$
+since $\mathbf{L}'_t \succeq \mathbf{0}$ by Part~(i).
+
+\paragraph{Part (iii).}
+For any $\mathbf{x} \ne \mathbf{0}$,
+$\mathbf{x}^\top \mathbf{Q}_t \mathbf{x}
+= \alpha\|\mathbf{x}\|^2 + \beta\mathbf{x}^\top \mathbf{L}_t^{(R)}\mathbf{x}
++ \sigma_{\min}\|\mathbf{x}\|^2
+\ge (\alpha+\sigma_{\min})\|\mathbf{x}\|^2 > 0$,
+so $\mathbf{Q}_t \succ \mathbf{0}$ and hence $\mathbf{G}_t = \mathbf{Q}_t^{-1}$
+is symmetric positive definite. \qed
+
+\subsection{Proof of Lemma~\ref{lem:laplacian-monotone} (Laplacian Monotonicity)}
+
+\begin{proof}
+For any symmetric non-negative weight matrix $\mathbf{A}$, the unnormalised
+Laplacian is $\mathbf{L}_{\mathbf{A}} = \diag(\mathbf{A}) -
+\mathbf{A} \triangleq \mathbf{D}-\mathbf{A}$ where $\mathbf{D}$ is the degree matrix. Linearity of Lemma 2 gives
+$\mathbf{L}_{\mathbf{W}+\Delta\mathbf{W}} = \mathbf{L}_{\mathbf{W}}
++ \mathbf{L}_{\Delta\mathbf{W}}$.  The standard quadratic-form identity
+yields $\mathbf{x}^\top \mathbf{L}_{\Delta\mathbf{W}} \mathbf{x}
+= \frac{1}{2}\sum_{i,j}\Delta w_{ij}(x_i-x_j)^2 \ge 0$ for all
+$\mathbf{x}$, so $\mathbf{L}_{\Delta\mathbf{W}} \succeq \mathbf{0}$.
+\end{proof}
+
+\subsection{Proof of Proposition~\ref{prop:spectral-gap} (Spectral Gap Monotonicity)}
+
+\begin{proof}
+Write $\Delta\mathbf{W}_t = \mathbf{W}'_t - \mathbf{W}_t$. By the rewiring
+rule,
+\[
+W'_{ij,t} = W_{ij,t}(1 + \lambda b_{ij,t}),
+\qquad
+\lambda > 0,\quad b_{ij,t}\ge 0,
+\]
+so $\Delta\mathbf{W}_t \ge 0$ entrywise. By
+Lemma~\ref{lem:laplacian-monotone},
+\[
+\mathbf{L}'_t = \mathbf{L}_t + \mathbf{L}_{\Delta\mathbf{W}_t},
+\qquad
+\mathbf{L}_{\Delta\mathbf{W}_t}\succeq \mathbf{0},
+\]
+which proves (i).
+
+For (ii), since it is a classical algebraic statement, the reader can see Corollary 4.3.12\cite{Horn_Johnson_1985}.
+
+\end{proof}
+
+\subsection{Proof of Corollary ~\ref{cor:total-eff-res}} (Improved Scaled Kirchhoff Index).
+\begin{proof}
+Since
+\[
+\mathbf{L}'_t=\mathbf{L}_t+\mathbf{L}_{\Delta\mathbf{W}_t},
+\qquad
+\mathbf{L}_{\Delta\mathbf{W}_t}\succeq 0,
+\]
+According to Corollary 4.3.12\cite{Horn_Johnson_1985}, the following holds:
+\[
+\lambda_k(\mathbf{L}'_t)\ge \lambda_k(\mathbf{L}_t)
+\qquad (k=1,\dots,N).
+\]
+Therefore
+\[
+\mathcal{K}(\mathbf{W}'_t)
+=
+\sum_{k=2}^N 1/ \lambda_k(\mathbf{L}'_t)
+\le
+\sum_{k=2}^N 1/ \lambda_k(\mathbf{L}_t)
+=
+\mathcal{K}(\mathbf{W}_t).
+\]
+\end{proof}
+
+\subsection{Proof of Proposition ~\ref{prop:oversquashing}}
+
+
+\begin{proof}
+The proof is given in  LASER~\cite{barbero2024laser}.
+\end{proof}
+
+% --------------------------------------------------------------------------
+\section{Notation Table}
+\label{app:notation}
+
+\begin{table}[h]
+\centering
+\caption{Summary of key notation used in Section~\ref{sec:method}.}
+\label{tab:notation}
+\begin{tabular}{ll}
+\toprule
+Symbol & Definition \\
+\midrule
+$\calG_t = (\mathcal{V},\calE_t,\mathbf{A}_t)$ & Dynamic graph (topology only) \\
+$\mathbf{A}_t \in \R^{N\times N}$ & Adjacency matrix of $\calG_t$ \\
+$\mathbf{L}'_t \in \R^{N\times N}$ & Rewired graph Laplacian (Algorithm~\ref{alg:rewiring}) \\
+$\Sigma^{\mathrm{spa}}_t \in \R^{R\times R}$ & Spatial factor covariance \\
+$\mathbf{C}_t \in \R^{D\times D}$ & Temporal kernel-mixture correlation matrix \\
+$\mathbf{\Pi} \in \R^{N\times R}$ & Learnable projection matrix ($\mathbf{P} = \mathrm{colnorm}(\mathbf{\Pi})$) \\
+$\Gamma_t \in \R^{N\times N}$ & Cholesky factor of conditional covariance \\
+$\boldsymbol{\eta}_t^{\mathrm{bat}} \in \R^{DN}$ & Stacked residuals $\vec(\boldsymbol{\eta}_{t-D+1:t})$ \\
+$\Sigma_t^{\mathrm{bat}} \in \R^{DN\times DN}$ & Batch covariance over window $D$ \\
+$\mathbf{D}_t \in \R^{N\times N}$ & Diagonal node-wise volatility scaling \\
+$\kappa_{ij,t}$ & Balanced Forman curvature of edge $(i,j)$ at time $t$ \\
+$b_{ij,t}$ & Bottleneck score $= \operatorname{softplus}(\tau(\kappa_0-\kappa_{ij,t}))$ \\
+$h(\calG)$ & Cheeger (edge expansion) constant of graph $\calG$ \\
+$R_{\mathrm{eff}}(i,j)$ & Effective resistance between nodes $i$ and $j$ \\
+$\mathcal{K}(\mathbf{W})$ & Kirchhoff index (total effective resistance) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Implementation Details}
+All models in the paper were trained in a Conda environment running on an Intel 13900F and 2 NVIDIA RTX 4090 with 24 GB. Our Pytorch version is 1.13.1 with CUDA 11.7.
+\section{Datasets Description}
+
+
+\begin{table}[h]
+\centering
+\caption{Datasets Description.}
+\label{tab:datasets}
+\resizebox{0.5\textwidth}{!}{
+\begin{tabular}{lllrr}
+\toprule
+\textbf{Dataset} & \textbf{Data Type }& \textbf{Region} & \textbf{Nodes} & \textbf{Time Steps} \\
+\midrule
+PeMS03 & Traffic Speed & California & 358 & 26208 \\
+PeMS04 & Traffic Speed & California & 307 & 16992 \\
+PeMS07 & Traffic Speed & California & 883 & 26208 \\
+Brussels & Traffic Count & Brussels & 195 & 12672 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+
+\section{Memory and Runtime}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{figs/memory.png}
+\caption{Analysis of computation resources for Brussels dataset. Teger consumes resources less than TCVAR~\cite{zheng2024multivariateprobabilistictimeseries} and LASER~\cite{barbero2024laser} methods, while forecasting more accurately.}
+\label{fig3_mem}
+\end{figure}
+
+We evaluate the performance of our proposed method compared to TCVAR and LASER in terms of memory and runtime computation resources, which the results are shown in Figure~\ref{fig3_mem}. 
+
+
+\section{Hyperparameter Tuning}
+\label{sec:hyperparameter_search}
+
+The hyperparameter search span and the optimal choice are summarized in Table\ref{tab:hyperparameters}.
+
+\begin{table}[!t]
+\caption{{Hyperparameter settings.}}
+\label{tab:hyperparameters}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}l l c@{}}
+\toprule
+\textbf{Group} & \textbf{Parameter} & \textbf{Value} \\
+\midrule
+\multirow{5}{*}{Training}
+  & Max epochs                   & 100        \\
+  & Max steps                    & 10{,}000   \\
+  & Node batch size $B$               & 20         \\
+  & Gradient clip                & 10.0       \\
+  & Weight decay                 & $10^{-8}$  \\
+\midrule
+\multirow{3}{*}{Backbone}
+  & Hidden dim $H$               & 40         \\
+  & RNN/xLSTM/Transformers layers                   & 2          \\
+  & Dropout                      & 0.01       \\
+\midrule
+\multirow{5}{*}{\shortstack[l]{Temporal\\Correlation}}
+  & Batch horizon $D$            & 12 \\
+  & Mixture components $M$       & 4          \\
+  & Low-rank dim $R$             & 10         \\
+  & Length-scale step $\sigma'$  & 1.0        \\
+  & Loss LR / weight decay       & $10^{-3}$ / $10^{-8}$ \\
+\midrule
+\multirow{6}{*}{\shortstack[l]{Curvature\\(Alg.~\ref{alg:rewiring})}}
+  & Precision diag.\ $\alpha$    & 0.01       \\
+  & Laplacian weight $\beta$     & 1.0        \\
+  & Bottleneck strength $\lambda$& 1.0        \\
+  & Curvature threshold $\kappa_0$ & 0.0      \\
+  & Sensitivity $\tau$           & 5.0        \\
+  & Proj.\ floor $\sigma_{\min}$ & $10^{-4}$  \\
+\midrule
+Optimization
+  & Learning Rate $\eta$           & $\{10^{-3},10^{-2}\}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Statistical Significance Test}
+The statistical significance test is detailed in Table~\ref{tab:xlstm-statistical-results}.
+
+\begin{table}[t]
+\centering
+\caption{Teger statistical significance over 24 rolling forecast test windows. Values are mean \(\pm\) std across windows. QL0.5,  and QL0.9 use the aggregate values reported in the existing metrics files.}
+\label{tab:xlstm-statistical-results}
+\small
+\begin{tabular}{llcccc}
+\toprule
+Backbone & Dataset & CRPS-mean & CRPS-sum & QL0.5 & QL0.9 \\
+\midrule
+\multirow{2}{*}{xLSTM}
+  & Brussels & \textbf{\(0.0239 \pm 0.0002\)} & \textbf{\(0.0619 \pm 0.0094\)} & \textbf{\(0.0141 \pm 0.0001\)} & \(0.0096 \pm 0.0001\) \\
+  & pems03 & \(0.0270 \pm 0.0019\) & \(0.0341 \pm 0.0023\) & \(0.0210 \pm 0.0001\) & \(0.0362 \pm 0.0001\) \\
+\midrule
+\multirow{2}{*}{Transformer}
+  & Brussels & \(0.0275 \pm 0.0099\) & \(0.0695 \pm 0.0108\) & \(0.0161 \pm 0.0001\) & \(0.0111 \pm 0.0001\) \\
+  & pems03 & \(0.0311 \pm 0.0022\) & \(0.0316 \pm 0.0026\) & \(0.0242 \pm 0.0001\) & \(0.0416 \pm 0.0002\) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Brussels Reweighting Details}\label{Brussels_des}
+
+The Brussels graph contains $6,632$ undirected edges. Balanced Forman curvature values lie in the range $[-0.2025,\; +0.4151]$ with mean $\bar{\kappa}{=}{-0.0755}$ and standard deviation $\sigma_\kappa{=}0.0565$. As expected for a proximity-based sensor graph, 95.4\% of edges have $\kappa_{ij}{<}0$: most sensor pairs lie along chain-like corridors without shared alternative sensor neighbors, which produces negative Balanced Forman curvature by construction. Of the 6\,632 edges, the model designates $663$ (10\%) as \emph{rewired}, defined as those whose bottleneck score $b_{ij}$ meets or exceeds the 90th percentile of the full edge distribution ($b \geq 2.20$); the remaining 90\% receive negligible reweighting ($W'_{ij}/W_{ij} \approx 1$). We annotate three sensor clusters in Figure~\ref{fig_casestudy}, chosen to span the range of bottleneck behavior. Node N1 corresponds to the sensor (Schaerbeek municipality), which has the highest mean incident bottleneck score of any sensor in the network ($\bar{b}{=}3.70$). Its five strongest edges all connect to neighbouring Schaerbeek sensors and achieve Balanced Forman curvature in the range $[-0.198, -0.203]$, more than two standard deviations below the graph mean, resulting in covariance reweighting of $10.9$–$11.3\times$ (Table~\ref{tab:brussels_edges}, row~E1). These sensor pairs share only 74–82 common sensor neighbors despite each node having degree~85–108. Node N2 (0.7\,km from Place Robert Schuman, $\bar{\kappa}{=}{-0.078}$). Its strongest rewired edge connects to Etterbeek sensor N2 with $\kappa{=}{-0.121}$, $W'/W{=}4.43\times$, and 63 common neighbours (Table~\ref{tab:brussels_edges}, row~E2). {Node N3} (approximately 0.6\,km from Arts-Loi junction), whose strongest rewired edge to the same Etterbeek sensor yields $\kappa{=}{-0.110}$ and $W'/W{=}3.52\times$ (row~E3). Cross-municipality edges (Brussels$\leftrightarrow$Etterbeek) appear prominently among rewired edges because the two sensor clusters share proportionally fewer common neighbours than intra-municipality pairs, lowering $\kappa$ and raising $b$. For comparison, row~R1 shows a representative non-rewired edge in the Auderghem sub-cluster: $\kappa{=}+0.415$, $|\Delta|{=}10$ (proportionally high relative to node degree), and $W'/W{=}1.00$ — the model correctly assigns zero amplification to this geometrically well-connected pair.
+\begin{figure}[!t]
+\centering
+\begin{subfigure}[b]{0.30\linewidth}
+    \includegraphics[width=\linewidth,height=2.4cm]%
+    {figs/usecase/een-doorsneedag-op-het-meiserplein}
+    \caption{Place Meiser (N1)}
+    \label{fig5_a}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.30\linewidth}
+    \includegraphics[width=\linewidth,height=2.4cm]%
+    {figs/usecase/Screenshot_from_2026-04-30_12-46-17.png}
+    \caption{Place Schuman (N2)}
+    \label{fig5_b}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.30\linewidth}
+    \includegraphics[width=\linewidth,height=2.4cm]%
+    {figs/usecase/Screenshot_from_2026-04-30_12-43-28.png}
+    \caption{Arts-Loi (N3)}
+    \label{fig5_c}
+\end{subfigure}
+\caption{An Illustrative traffic snapshot at the three annotated sensor clusters. Images are static snapshots from Google Map service and were not selected to match any specific traffic event in the dataset.}
+\label{fig:snapshot}
+\end{figure}
+\begin{table*}[t]
+\caption{Brussels edge statistics.}
+\label{tab:brussels_edges}
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.05}
+\resizebox{0.7\textwidth}{!}{
+\begin{tabular}{@{}llrrrrrc@{}}
+\toprule
+Label & Sensor pair & $\kappa$ & $W$ & $W'$ & $W'/W$ & $|\Delta|$ & Rev. \\
+\midrule
+\multicolumn{8}{@{}l}{\textit{Rewired edges --- strong bottleneck signal}} \\
+E1 & \texttt{N1} $\leftrightarrow$ \texttt{N3} & $-0.203$ & $0.701$ & $7.923$ & $11.30\times$ & 74 & \checkmark \\
+E2 & \texttt{N1} $\leftrightarrow$ \texttt{N2} & $-0.121$ & $0.689$ & $3.055$ & $4.43\times$ & 63 & \checkmark \\
+E3 & \texttt{N2} $\leftrightarrow$ \texttt{N3} & $-0.110$ & $0.586$ & $2.061$ & $3.52\times$ & 59 & \checkmark \\
+\midrule
+\multicolumn{8}{@{}l}{\textit{Non-rewired reference edge --- well-connected cluster}} \\
+R1 & --- & $+0.415$ & $1.000$ & $1.000$ & $1.00\times$ & 10 & --- \\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+The street imagery in Figure~\ref{fig:snapshot} provides geographic context for
+clusters N1–N3 and is presented as illustrative background only. It was not used as
+evidence for model correctness and cannot be independently reproduced as quantitative
+validation. The graph's Euclidean-distance construction means that the edges
+highlighted here reflect sensor-proximity bottlenecks; claims about specific
+road-network features (tunnels, ring roads) cannot be formally substantiated
+without a topology-derived graph, and we do not make such claims here.
+
+\section{Graph construction}\label{graph_cons}
+For PeMS and Brussels datasets, the adjacency matrix $A$ is the thresholded Gaussian kernel $A_{ij} = exp(-d_{ij}^2 / (2\sigma^2))$ if $A_{ij} \geq 0.1$, else 0, where $d_{ij}$ is the road network distance between sensors $i$ and $j$ and $\sigma$ is the standard deviation of all pairwise distances. For Brussels, GPS Euclidean distance is used in place of road-network distance. The resulting graphs are symmetric, connected, and held fixed across all experiments. We build the dynamic graph, consequently, as in \cite{sym17071007}. For PeMS datasets, the dynamic graph is given.
+
+
+
+\section{Rebuttal}
+
+% =====================================================================
+%  REPLACEMENT FOR TABLE 3  --  ablation ladder + companion tables
+%  Requires: \usepackage{booktabs}
+%  Placeholder macro: every unfilled cell is \tbd, so the table compiles
+%  as-is and can go into the manuscript before all runs have landed.
+%  Grep for "\tbd" to see what is still outstanding.
+% =====================================================================
+\newcommand{\tbd}{\textcolor{gray}{\texttt{0.XXXX}}}   % needs \usepackage{xcolor}
+% \newcommand{\tbd}{\texttt{0.XXXX}}                   % xcolor-free fallback
+
+% ---- panel set: crps_sum ----
+% TODO: complete by the experiment plans
+\begin{table}[t]
+\centering
+\caption{Ablation ladder. CRPS$_{\mathrm{sum}}\downarrow$ on the full test set, mean$\pm$std over $\geq\!3$ seeds. Row (3) is the capacity control: it adds the spatial covariance head with reweighting disabled. Rows (4)--(6) match row (7)'s total added edge mass, so any gap isolates \emph{where} the mass is placed. $^{\dagger}$/$^{\ddagger}$: improvement over row (3)/row (5) significant at $p<0.05$ (paired Wilcoxon over 24 rolling windows). $\bar{\Delta}$ is the mean relative error reduction w.r.t.\ row (3) across datasets; positive is better.}
+\label{tab:ablation}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{clcccccc}
+\toprule
+\# & Variant & PeMS03 & PeMS04 & PeMS07 & Brussels & $\bar{\Delta}$ vs.\ (3) & Isolates \\
+\midrule
+\multicolumn{8}{l}{\emph{xLSTM backbone}} \\
+(1) & Backbone + diagonal Gaussian & \tbd & \tbd & \tbd & \tbd & \tbd & baseline \\
+(2) & \;+ temporal covariance \emph{(= TCVAR, our impl.)} & \tbd & \tbd & \tbd & \tbd & \tbd & temporal structure \\
+(3) & \;+ spatial covariance, $\lambda\!=\!0$ (no reweighting) & \tbd & \tbd & \tbd & \tbd & -- & added covariance capacity \\
+(4) & \;+ uniform reweighting (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & added edge mass \\
+(5) & \;+ permuted curvature (mass-matched null) & \tbd & \tbd & \tbd & \tbd & \tbd & topological alignment \\
+(6) & \;+ inverse curvature (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & sign of the signal \\
+(7) & \;+ curvature reweighting & \tbd & \tbd & \tbd & \tbd & \tbd & \textbf{the claim} \\
+(8) & \;+ node-wise volatility scaling \emph{(full Teger)} & \tbd & \tbd & \tbd & \tbd & \tbd & volatility adaptation \\
+(9) & \quad full Teger, un-projected ($R\!=\!N$) & -- & -- & -- & \tbd & \tbd & projection error \\
+\midrule
+\multicolumn{8}{l}{\emph{MTGNN backbone}} \\
+(1) & Backbone + diagonal Gaussian & \tbd & \tbd & \tbd & \tbd & \tbd & baseline \\
+(2) & \;+ temporal covariance \emph{(= TCVAR, our impl.)} & \tbd & \tbd & \tbd & \tbd & \tbd & temporal structure \\
+(3) & \;+ spatial covariance, $\lambda\!=\!0$ (no reweighting) & \tbd & \tbd & \tbd & \tbd & -- & added covariance capacity \\
+(4) & \;+ uniform reweighting (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & added edge mass \\
+(5) & \;+ permuted curvature (mass-matched null) & \tbd & \tbd & \tbd & \tbd & \tbd & topological alignment \\
+(6) & \;+ inverse curvature (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & sign of the signal \\
+(7) & \;+ curvature reweighting & \tbd & \tbd & \tbd & \tbd & \tbd & \textbf{the claim} \\
+(8) & \;+ node-wise volatility scaling \emph{(full Teger)} & \tbd & \tbd & \tbd & \tbd & \tbd & volatility adaptation \\
+(9) & \quad full Teger, un-projected ($R\!=\!N$) & -- & -- & -- & \tbd & \tbd & projection error \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---- panel set: crps_mean ----
+\begin{table}[t]
+\centering
+\caption{Ablation ladder, CRPS-mean$\downarrow$. Setup as in Table~\ref{tab:ablation}.}
+\label{tab:ablation-crpsmean}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{clcccccc}
+\toprule
+\# & Variant & PeMS03 & PeMS04 & PeMS07 & Brussels & $\bar{\Delta}$ vs.\ (3) & Isolates \\
+\midrule
+\multicolumn{8}{l}{\emph{xLSTM backbone}} \\
+(1) & Backbone + diagonal Gaussian & \tbd & \tbd & \tbd & \tbd & \tbd & baseline \\
+(2) & \;+ temporal covariance \emph{(= TCVAR, our impl.)} & \tbd & \tbd & \tbd & \tbd & \tbd & temporal structure \\
+(3) & \;+ spatial covariance, $\lambda\!=\!0$ (no reweighting) & \tbd & \tbd & \tbd & \tbd & -- & added covariance capacity \\
+(4) & \;+ uniform reweighting (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & added edge mass \\
+(5) & \;+ permuted curvature (mass-matched null) & \tbd & \tbd & \tbd & \tbd & \tbd & topological alignment \\
+(6) & \;+ inverse curvature (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & sign of the signal \\
+(7) & \;+ curvature reweighting & \tbd & \tbd & \tbd & \tbd & \tbd & \textbf{the claim} \\
+(8) & \;+ node-wise volatility scaling \emph{(full Teger)} & \tbd & \tbd & \tbd & \tbd & \tbd & volatility adaptation \\
+(9) & \quad full Teger, un-projected ($R\!=\!N$) & -- & -- & -- & \tbd & \tbd & projection error \\
+\midrule
+\multicolumn{8}{l}{\emph{MTGNN backbone}} \\
+(1) & Backbone + diagonal Gaussian & \tbd & \tbd & \tbd & \tbd & \tbd & baseline \\
+(2) & \;+ temporal covariance \emph{(= TCVAR, our impl.)} & \tbd & \tbd & \tbd & \tbd & \tbd & temporal structure \\
+(3) & \;+ spatial covariance, $\lambda\!=\!0$ (no reweighting) & \tbd & \tbd & \tbd & \tbd & -- & added covariance capacity \\
+(4) & \;+ uniform reweighting (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & added edge mass \\
+(5) & \;+ permuted curvature (mass-matched null) & \tbd & \tbd & \tbd & \tbd & \tbd & topological alignment \\
+(6) & \;+ inverse curvature (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & sign of the signal \\
+(7) & \;+ curvature reweighting & \tbd & \tbd & \tbd & \tbd & \tbd & \textbf{the claim} \\
+(8) & \;+ node-wise volatility scaling \emph{(full Teger)} & \tbd & \tbd & \tbd & \tbd & \tbd & volatility adaptation \\
+(9) & \quad full Teger, un-projected ($R\!=\!N$) & -- & -- & -- & \tbd & \tbd & projection error \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---- panel set: nll ----
+\begin{table}[t]
+\centering
+\caption{Ablation ladder, NLL$\downarrow$. Setup as in Table~\ref{tab:ablation}.}
+\label{tab:ablation-nll}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{clcccccc}
+\toprule
+\# & Variant & PeMS03 & PeMS04 & PeMS07 & Brussels & $\bar{\Delta}$ vs.\ (3) & Isolates \\
+\midrule
+\multicolumn{8}{l}{\emph{xLSTM backbone}} \\
+(1) & Backbone + diagonal Gaussian & \tbd & \tbd & \tbd & \tbd & \tbd & baseline \\
+(2) & \;+ temporal covariance \emph{(= TCVAR, our impl.)} & \tbd & \tbd & \tbd & \tbd & \tbd & temporal structure \\
+(3) & \;+ spatial covariance, $\lambda\!=\!0$ (no reweighting) & \tbd & \tbd & \tbd & \tbd & -- & added covariance capacity \\
+(4) & \;+ uniform reweighting (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & added edge mass \\
+(5) & \;+ permuted curvature (mass-matched null) & \tbd & \tbd & \tbd & \tbd & \tbd & topological alignment \\
+(6) & \;+ inverse curvature (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & sign of the signal \\
+(7) & \;+ curvature reweighting & \tbd & \tbd & \tbd & \tbd & \tbd & \textbf{the claim} \\
+(8) & \;+ node-wise volatility scaling \emph{(full Teger)} & \tbd & \tbd & \tbd & \tbd & \tbd & volatility adaptation \\
+(9) & \quad full Teger, un-projected ($R\!=\!N$) & -- & -- & -- & \tbd & \tbd & projection error \\
+\midrule
+\multicolumn{8}{l}{\emph{MTGNN backbone}} \\
+(1) & Backbone + diagonal Gaussian & \tbd & \tbd & \tbd & \tbd & \tbd & baseline \\
+(2) & \;+ temporal covariance \emph{(= TCVAR, our impl.)} & \tbd & \tbd & \tbd & \tbd & \tbd & temporal structure \\
+(3) & \;+ spatial covariance, $\lambda\!=\!0$ (no reweighting) & \tbd & \tbd & \tbd & \tbd & -- & added covariance capacity \\
+(4) & \;+ uniform reweighting (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & added edge mass \\
+(5) & \;+ permuted curvature (mass-matched null) & \tbd & \tbd & \tbd & \tbd & \tbd & topological alignment \\
+(6) & \;+ inverse curvature (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & sign of the signal \\
+(7) & \;+ curvature reweighting & \tbd & \tbd & \tbd & \tbd & \tbd & \textbf{the claim} \\
+(8) & \;+ node-wise volatility scaling \emph{(full Teger)} & \tbd & \tbd & \tbd & \tbd & \tbd & volatility adaptation \\
+(9) & \quad full Teger, un-projected ($R\!=\!N$) & -- & -- & -- & \tbd & \tbd & projection error \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---- panel set: mae ----
+\begin{table}[t]
+\centering
+\caption{Ablation ladder, MAE$\downarrow$. Setup as in Table~\ref{tab:ablation}.}
+\label{tab:ablation-mae}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{clcccccc}
+\toprule
+\# & Variant & PeMS03 & PeMS04 & PeMS07 & Brussels & $\bar{\Delta}$ vs.\ (3) & Isolates \\
+\midrule
+\multicolumn{8}{l}{\emph{xLSTM backbone}} \\
+(1) & Backbone + diagonal Gaussian & \tbd & \tbd & \tbd & \tbd & \tbd & baseline \\
+(2) & \;+ temporal covariance \emph{(= TCVAR, our impl.)} & \tbd & \tbd & \tbd & \tbd & \tbd & temporal structure \\
+(3) & \;+ spatial covariance, $\lambda\!=\!0$ (no reweighting) & \tbd & \tbd & \tbd & \tbd & -- & added covariance capacity \\
+(4) & \;+ uniform reweighting (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & added edge mass \\
+(5) & \;+ permuted curvature (mass-matched null) & \tbd & \tbd & \tbd & \tbd & \tbd & topological alignment \\
+(6) & \;+ inverse curvature (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & sign of the signal \\
+(7) & \;+ curvature reweighting & \tbd & \tbd & \tbd & \tbd & \tbd & \textbf{the claim} \\
+(8) & \;+ node-wise volatility scaling \emph{(full Teger)} & \tbd & \tbd & \tbd & \tbd & \tbd & volatility adaptation \\
+(9) & \quad full Teger, un-projected ($R\!=\!N$) & -- & -- & -- & \tbd & \tbd & projection error \\
+\midrule
+\multicolumn{8}{l}{\emph{MTGNN backbone}} \\
+(1) & Backbone + diagonal Gaussian & \tbd & \tbd & \tbd & \tbd & \tbd & baseline \\
+(2) & \;+ temporal covariance \emph{(= TCVAR, our impl.)} & \tbd & \tbd & \tbd & \tbd & \tbd & temporal structure \\
+(3) & \;+ spatial covariance, $\lambda\!=\!0$ (no reweighting) & \tbd & \tbd & \tbd & \tbd & -- & added covariance capacity \\
+(4) & \;+ uniform reweighting (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & added edge mass \\
+(5) & \;+ permuted curvature (mass-matched null) & \tbd & \tbd & \tbd & \tbd & \tbd & topological alignment \\
+(6) & \;+ inverse curvature (mass-matched) & \tbd & \tbd & \tbd & \tbd & \tbd & sign of the signal \\
+(7) & \;+ curvature reweighting & \tbd & \tbd & \tbd & \tbd & \tbd & \textbf{the claim} \\
+(8) & \;+ node-wise volatility scaling \emph{(full Teger)} & \tbd & \tbd & \tbd & \tbd & \tbd & volatility adaptation \\
+(9) & \quad full Teger, un-projected ($R\!=\!N$) & -- & -- & -- & \tbd & \tbd & projection error \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =====================================================================
+%  COMPANION TABLE A -- replaces/extends current Table 2.
+%  Purpose: answers kgxJ W1 ("Props 3/5 hold for ANY monotone weight
+%  increase, so they do not justify curvature"). The permutation null has
+%  identical total added mass and identical multiplier distribution, so a
+%  gap here is attributable to topological alignment alone.
+% =====================================================================
+\begin{table}[t]
+\centering
+\caption{Graph-measure improvement (\%) after Algorithm~1, against a mass-matched
+permutation null. \emph{Null} reassigns Teger's multiplier multiset to a random
+permutation of the edges ($n\!=\!10$ draws, mean$\pm$std); total added edge mass,
+multiplier distribution and number of touched edges are identical by construction.
+$p$ is the empirical one-sided permutation $p$-value. $\phi$ is evaluated on the
+curvature-identified bottleneck cut $S^\star$ (Appendix~\ref{app:cuts}).
+xLSTM backbone.}
+\label{tab:graphnull}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccccccccc}
+\toprule
+& \multicolumn{3}{c}{$\mathcal{K}(\mathbf{W}_t)/\mathcal{K}(\mathbf{W}'_t)$}
+& \multicolumn{3}{c}{$\lambda'_2/\lambda_2$}
+& \multicolumn{3}{c}{$\phi_{\mathbf{W}'_t}(S^\star)/\phi_{\mathbf{W}_t}(S^\star)$} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+Dataset & Teger & Null & $p$ & Teger & Null & $p$ & Teger & Null & $p$ \\
+\midrule
+Brussels & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+PeMS03   & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+PeMS04   & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+PeMS07   & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% NOTE ON \lambda_2 : the current Table 2 reports \lambda'_{n-1}/\lambda_{n-1},
+% i.e. the SECOND-LARGEST eigenvalue under the ordering \lambda_n >= ... >= \lambda_1
+% declared at line 144. The spectral gap / Cheeger quantity is the second-SMALLEST,
+% \lambda_2 in the ascending convention. Confirm which was actually computed before
+% filling this in -- if the reported column is the second-largest, the numbers do not
+% support the spectral-gap claim at all and a reviewer will catch it.
+
+
+% =====================================================================
+%  COMPANION TABLE B -- curvature as a cheap surrogate for the exact
+%  first-order spectral-gap sensitivity. Answers kgxJ W2 ("why this
+%  reweighting formula?"). Since d(lambda_2)/d(w_ij) = (v_i - v_j)^2 for
+%  the Fiedler vector v, the oracle allocation is computable but O(N^3);
+%  curvature is an O(1) local proxy for it.
+% =====================================================================
+\begin{table}[t]
+\centering
+\caption{Balanced Forman curvature as a local surrogate for the exact spectral-gap
+sensitivity. $\rho$ is the Spearman correlation between $-\kappa_{ij}$ and the
+Fiedler sensitivity $(v_i-v_j)^2$ over all edges. \emph{Oracle} allocates the same
+total added mass proportionally to $(v_i-v_j)^2$; \emph{Teger} allocates it by
+curvature. Closing most of the gap to the oracle at $O(1)$ per-edge cost is the
+justification for the curvature signal.}
+\label{tab:proxy}
+\small
+\begin{tabular}{lccccc}
+\toprule
+& & \multicolumn{3}{c}{CRPS$_{\mathrm{sum}}\downarrow$ (xLSTM)} & \\
+\cmidrule(lr){3-5}
+Dataset & $\rho(-\kappa,(v_i-v_j)^2)$ & Null (5) & Teger (7) & Oracle & \% of oracle gain \\
+\midrule
+Brussels & \tbd & \tbd & \tbd & \tbd & \tbd \\
+PeMS03   & \tbd & \tbd & \tbd & \tbd & \tbd \\
+PeMS04   & \tbd & \tbd & \tbd & \tbd & \tbd \\
+PeMS07   & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% =====================================================================
+%  COMPANION TABLE C -- functional-form ablation. Shows the specific
+%  softplus form is not load-bearing (or, if it is, quantifies by how
+%  much). Total added mass held equal across all rows.
+% =====================================================================
+\begin{table}[t]
+\centering
+\caption{Sensitivity to the reweighting functional form. All rows use the same
+curvature ranking and the same total added edge mass; only the shape of
+$b_{ij}(\kappa_{ij})$ changes. CRPS$_{\mathrm{sum}}\downarrow$, xLSTM, mean$\pm$std
+over $\geq\!3$ seeds.}
+\label{tab:form}
+\small
+\begin{tabular}{llcccc}
+\toprule
+Form & $b_{ij}$ & PeMS03 & PeMS04 & PeMS07 & Brussels \\
+\midrule
+softplus (ours) & $\mathrm{softplus}(\tau(\kappa_0-\kappa_{ij}))$ & \tbd & \tbd & \tbd & \tbd \\
+exponential     & $\exp(\tau(\kappa_0-\kappa_{ij}))$              & \tbd & \tbd & \tbd & \tbd \\
+linear (hinge)  & $\max(0,\tau(\kappa_0-\kappa_{ij}))$            & \tbd & \tbd & \tbd & \tbd \\
+hard top-$k$    & $\mathbf{1}[\kappa_{ij}\le\kappa_{(k)}]$        & \tbd & \tbd & \tbd & \tbd \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% =====================================================================
+%  COMPANION TABLE D -- dose-response. Does the graph-measure improvement
+%  predict the CRPS gain? This is the direct answer to R3's Q1 and to the
+%  AC's "establish that gains arise specifically from curvature-guided
+%  spatial modeling". 16 points = 4 datasets x 4 backbones.
+%  WARNING: on the numbers already in Tables 1-2 this correlation may come
+%  out weak (PeMS04 has moderate graph gains but the largest CRPS gains).
+%  Run it regardless -- a null result here means the ablation ladder has to
+%  carry the whole argument, which is worth knowing before writing prose.
+% =====================================================================
+\begin{table}[t]
+\centering
+\caption{Dose--response between graph-measure improvement and forecast gain, over all
+16 (dataset, backbone) pairs. Correlations reported both pooled and within-dataset
+(to remove between-dataset scale effects).}
+\label{tab:dose}
+\small
+\begin{tabular}{lccc}
+\toprule
+Graph measure & Pearson $r$ (pooled) & Spearman $\rho$ (pooled) & Mean within-dataset $\rho$ \\
+\midrule
+$\Delta\mathcal{K}$ (Kirchhoff)      & \tbd & \tbd & \tbd \\
+$\Delta\lambda_2$ (spectral gap)     & \tbd & \tbd & \tbd \\
+$\Delta\phi(S^\star)$ (conductance)  & \tbd & \tbd & \tbd \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\newpage
+\input{checklist.tex}
+
+
+\end{document}
