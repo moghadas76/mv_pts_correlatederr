@@ -1,0 +1,354 @@
+{
+  "script": "curvature_cross_lag_residual_corr.py",
+  "checkpoint": "logs/xLSTM/brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False/checkpoints/epoch=17-val_loss=64.74.ckpt",
+  "dataset": "brussels",
+  "model": "xLSTM",
+  "n_nodes": 195,
+  "n_edges": 6632,
+  "n_samples_mc": 100,
+  "seed": 42,
+  "sample_status": "IN-SAMPLE (same span/checkpoint as curvature_bottleneck_residual_corr_timeresolved.py; see that module's docstring for why the held-out tail is too short to use here)",
+  "span": {
+    "span_start": "2023-11-20",
+    "span_end": "2023-11-21",
+    "n_origins_used": 565,
+    "n_contiguous_runs": 1,
+    "run_lengths": [
+      565
+    ]
+  },
+  "k_max_lag_native_steps": 6,
+  "definition": "corr_lag[ell]_ij = corrcoef(residual_i(t), residual_j(t+ell)) over the pooled (t, t+ell) pairs from all contiguous rolling-origin runs; lag=0 is the plain contemporaneous correlation (consistency check against the W1 study). 'edges-only' restricts to graph edges (i,j); 'offdiag(all pairs)' is over every node pair, not just edges. 'self-lag' is corr(residual_i(t), residual_i(t+ell)), reported as a reference, not a cross-sensor quantity.",
+  "lag_results": [
+    {
+      "lag_native_steps": 0,
+      "lag_minutes": 0,
+      "n_time_pairs": 565,
+      "independence_noise_floor": 0.03359700078347244,
+      "mean_abs_corr_offdiag_all_pairs": 0.3998690058447296,
+      "mean_abs_corr_self_lag_reference": 1.0,
+      "mean_abs_corr_edges_only": 0.40213412130278026,
+      "quantile_bins_by_bottleneck_score": [
+        {
+          "bin": 0,
+          "b_lo": -9.999999999985238e-10,
+          "b_hi": 0.08937710118275102,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.40557876714133767,
+          "std_abs_corr": 0.1585691474803469,
+          "excess_over_floor": 0.37198176635786523
+        },
+        {
+          "bin": 1,
+          "b_lo": 0.08937710118275102,
+          "b_hi": 0.5332933593722509,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.39715344221238974,
+          "std_abs_corr": 0.16069282448668964,
+          "excess_over_floor": 0.3635564414289173
+        },
+        {
+          "bin": 2,
+          "b_lo": 0.5332933593722509,
+          "b_hi": 2.1449458251458338,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.3970421436294224,
+          "std_abs_corr": 0.15494954418655132,
+          "excess_over_floor": 0.36344514284595
+        },
+        {
+          "bin": 3,
+          "b_lo": 2.1449458251458338,
+          "b_hi": 11.604011533427958,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.40876213222797103,
+          "std_abs_corr": 0.13922412741673024,
+          "excess_over_floor": 0.3751651314444986
+        }
+      ]
+    },
+    {
+      "lag_native_steps": 1,
+      "lag_minutes": 5,
+      "n_time_pairs": 564,
+      "independence_noise_floor": 0.033626825024395054,
+      "mean_abs_corr_offdiag_all_pairs": 0.3047811985015869,
+      "mean_abs_corr_self_lag_reference": 0.41452479362487793,
+      "mean_abs_corr_edges_only": 0.3109029233455658,
+      "quantile_bins_by_bottleneck_score": [
+        {
+          "bin": 0,
+          "b_lo": -9.999999999985238e-10,
+          "b_hi": 0.08937710118275102,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.3136737644672394,
+          "std_abs_corr": 0.12757983803749084,
+          "excess_over_floor": 0.2800469394428443
+        },
+        {
+          "bin": 1,
+          "b_lo": 0.08937710118275102,
+          "b_hi": 0.5332933593722509,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.30969300866127014,
+          "std_abs_corr": 0.12703515589237213,
+          "excess_over_floor": 0.2760661836368751
+        },
+        {
+          "bin": 2,
+          "b_lo": 0.5332933593722509,
+          "b_hi": 2.1449458251458338,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.3060416579246521,
+          "std_abs_corr": 0.12342636287212372,
+          "excess_over_floor": 0.27241483290025703
+        },
+        {
+          "bin": 3,
+          "b_lo": 2.1449458251458338,
+          "b_hi": 11.604011533427958,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.31420332193374634,
+          "std_abs_corr": 0.11301799863576889,
+          "excess_over_floor": 0.28057649690935127
+        }
+      ]
+    },
+    {
+      "lag_native_steps": 2,
+      "lag_minutes": 10,
+      "n_time_pairs": 563,
+      "independence_noise_floor": 0.03365672883201594,
+      "mean_abs_corr_offdiag_all_pairs": 0.26545292139053345,
+      "mean_abs_corr_self_lag_reference": 0.3574506342411041,
+      "mean_abs_corr_edges_only": 0.2697201073169708,
+      "quantile_bins_by_bottleneck_score": [
+        {
+          "bin": 0,
+          "b_lo": -9.999999999985238e-10,
+          "b_hi": 0.08937710118275102,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.272455096244812,
+          "std_abs_corr": 0.11218561977148056,
+          "excess_over_floor": 0.2387983674127961
+        },
+        {
+          "bin": 1,
+          "b_lo": 0.08937710118275102,
+          "b_hi": 0.5332933593722509,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.26823973655700684,
+          "std_abs_corr": 0.11202925443649292,
+          "excess_over_floor": 0.2345830077249909
+        },
+        {
+          "bin": 2,
+          "b_lo": 0.5332933593722509,
+          "b_hi": 2.1449458251458338,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.2670499086380005,
+          "std_abs_corr": 0.10853787511587143,
+          "excess_over_floor": 0.23339317980598456
+        },
+        {
+          "bin": 3,
+          "b_lo": 2.1449458251458338,
+          "b_hi": 11.604011533427958,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.2711355984210968,
+          "std_abs_corr": 0.09786052256822586,
+          "excess_over_floor": 0.23747886958908088
+        }
+      ]
+    },
+    {
+      "lag_native_steps": 3,
+      "lag_minutes": 15,
+      "n_time_pairs": 562,
+      "independence_noise_floor": 0.033686712560752625,
+      "mean_abs_corr_offdiag_all_pairs": 0.2323381006717682,
+      "mean_abs_corr_self_lag_reference": 0.3040938079357147,
+      "mean_abs_corr_edges_only": 0.23683205246925354,
+      "quantile_bins_by_bottleneck_score": [
+        {
+          "bin": 0,
+          "b_lo": -9.999999999985238e-10,
+          "b_hi": 0.08937710118275102,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.23579806089401245,
+          "std_abs_corr": 0.09905318170785904,
+          "excess_over_floor": 0.20211134833325983
+        },
+        {
+          "bin": 1,
+          "b_lo": 0.08937710118275102,
+          "b_hi": 0.5332933593722509,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.23668457567691803,
+          "std_abs_corr": 0.09760509431362152,
+          "excess_over_floor": 0.2029978631161654
+        },
+        {
+          "bin": 2,
+          "b_lo": 0.5332933593722509,
+          "b_hi": 2.1449458251458338,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.23653188347816467,
+          "std_abs_corr": 0.09226711839437485,
+          "excess_over_floor": 0.20284517091741205
+        },
+        {
+          "bin": 3,
+          "b_lo": 2.1449458251458338,
+          "b_hi": 11.604011533427958,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.23831364512443542,
+          "std_abs_corr": 0.08535991609096527,
+          "excess_over_floor": 0.2046269325636828
+        }
+      ]
+    },
+    {
+      "lag_native_steps": 4,
+      "lag_minutes": 20,
+      "n_time_pairs": 561,
+      "independence_noise_floor": 0.033716776567236775,
+      "mean_abs_corr_offdiag_all_pairs": 0.20096056163311005,
+      "mean_abs_corr_self_lag_reference": 0.25462308526039124,
+      "mean_abs_corr_edges_only": 0.205718994140625,
+      "quantile_bins_by_bottleneck_score": [
+        {
+          "bin": 0,
+          "b_lo": -9.999999999985238e-10,
+          "b_hi": 0.08937710118275102,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.2058187574148178,
+          "std_abs_corr": 0.08862633258104324,
+          "excess_over_floor": 0.17210198084758105
+        },
+        {
+          "bin": 1,
+          "b_lo": 0.08937710118275102,
+          "b_hi": 0.5332933593722509,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.2044217437505722,
+          "std_abs_corr": 0.08789080381393433,
+          "excess_over_floor": 0.17070496718333544
+        },
+        {
+          "bin": 2,
+          "b_lo": 0.5332933593722509,
+          "b_hi": 2.1449458251458338,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.2062845081090927,
+          "std_abs_corr": 0.08454640954732895,
+          "excess_over_floor": 0.17256773154185595
+        },
+        {
+          "bin": 3,
+          "b_lo": 2.1449458251458338,
+          "b_hi": 11.604011533427958,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.2063509225845337,
+          "std_abs_corr": 0.07864212989807129,
+          "excess_over_floor": 0.17263414601729693
+        }
+      ]
+    },
+    {
+      "lag_native_steps": 5,
+      "lag_minutes": 25,
+      "n_time_pairs": 560,
+      "independence_noise_floor": 0.03374692121033196,
+      "mean_abs_corr_offdiag_all_pairs": 0.17627882957458496,
+      "mean_abs_corr_self_lag_reference": 0.21599172055721283,
+      "mean_abs_corr_edges_only": 0.17726893723011017,
+      "quantile_bins_by_bottleneck_score": [
+        {
+          "bin": 0,
+          "b_lo": -9.999999999985238e-10,
+          "b_hi": 0.08937710118275102,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.17948926985263824,
+          "std_abs_corr": 0.07981587201356888,
+          "excess_over_floor": 0.14574234864230629
+        },
+        {
+          "bin": 1,
+          "b_lo": 0.08937710118275102,
+          "b_hi": 0.5332933593722509,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.17780013382434845,
+          "std_abs_corr": 0.07823248207569122,
+          "excess_over_floor": 0.1440532126140165
+        },
+        {
+          "bin": 2,
+          "b_lo": 0.5332933593722509,
+          "b_hi": 2.1449458251458338,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.17654858529567719,
+          "std_abs_corr": 0.07486257702112198,
+          "excess_over_floor": 0.14280166408534523
+        },
+        {
+          "bin": 3,
+          "b_lo": 2.1449458251458338,
+          "b_hi": 11.604011533427958,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.1752377301454544,
+          "std_abs_corr": 0.0702587142586708,
+          "excess_over_floor": 0.14149080893512245
+        }
+      ]
+    },
+    {
+      "lag_native_steps": 6,
+      "lag_minutes": 30,
+      "n_time_pairs": 559,
+      "independence_noise_floor": 0.033777146851151706,
+      "mean_abs_corr_offdiag_all_pairs": 0.14904077351093292,
+      "mean_abs_corr_self_lag_reference": 0.18852457404136658,
+      "mean_abs_corr_edges_only": 0.14880633354187012,
+      "quantile_bins_by_bottleneck_score": [
+        {
+          "bin": 0,
+          "b_lo": -9.999999999985238e-10,
+          "b_hi": 0.08937710118275102,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.15287475287914276,
+          "std_abs_corr": 0.07319750636816025,
+          "excess_over_floor": 0.11909760602799105
+        },
+        {
+          "bin": 1,
+          "b_lo": 0.08937710118275102,
+          "b_hi": 0.5332933593722509,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.15060880780220032,
+          "std_abs_corr": 0.07150980830192566,
+          "excess_over_floor": 0.1168316609510486
+        },
+        {
+          "bin": 2,
+          "b_lo": 0.5332933593722509,
+          "b_hi": 2.1449458251458338,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.14783787727355957,
+          "std_abs_corr": 0.06825876235961914,
+          "excess_over_floor": 0.11406073042240786
+        },
+        {
+          "bin": 3,
+          "b_lo": 2.1449458251458338,
+          "b_hi": 11.604011533427958,
+          "n_edges": 1658,
+          "mean_abs_corr": 0.14390388131141663,
+          "std_abs_corr": 0.06523455679416656,
+          "excess_over_floor": 0.11012673446026491
+        }
+      ]
+    }
+  ],
+  "span_note": "Truncated to a 2-day window (2023-11-20 to 2023-11-21, R=565 rolling origins) instead of the full 21-day span used by the contemporaneous W1 study (brussels_xlstm_bottleneck_residual_corr_timeresolved.json, R=6037), because of a rebuttal deadline. The full 21-day run was started and killed after 1/21 chunks (~1hr projected total) to get a result in time. This shortens the effective sample size per lag bin (T ~ 560 vs ~6000) but the qualitative decay pattern -- contemporaneous correlation ~0.40, decaying smoothly and staying well above the independence floor through lag=30min -- is unambiguous even at this T. Re-running the full 21-day span (python src/curvature_cross_lag_residual_corr.py --span_start 2023-11-20 --span_end 2023-12-10 --device 1, ~1hr) would tighten the error bars but is not expected to change the qualitative conclusion."
+}

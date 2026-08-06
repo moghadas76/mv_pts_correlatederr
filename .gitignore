@@ -26,3 +26,7 @@ _CoqProject
 *.css
 *.js
 *.mmd
+*.npz
+*.txt
+*.pt
+

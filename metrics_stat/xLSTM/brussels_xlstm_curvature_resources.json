@@ -1,0 +1,62 @@
+{
+  "checkpoint": "logs/xLSTM/brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False/checkpoints/epoch=17-val_loss=64.74.ckpt",
+  "graph": {
+    "n_nodes": 195,
+    "n_edges": 6632,
+    "dtype": "float64"
+  },
+  "load": {
+    "time_ms": 583.4317000117153,
+    "rss_before_mb": 244.671875,
+    "rss_after_mb": 369.31640625,
+    "rss_delta_mb": 124.64453125
+  },
+  "learned_parameters": {
+    "lambda": 0.8778427839279175,
+    "kappa_0": -0.1184227466583252,
+    "tau": 5.446372985839844,
+    "alpha": 0.010651950724422932,
+    "beta": 0.8993894457817078
+  },
+  "benchmarks": {
+    "curvature_core_kappa_b_reweight": {
+      "name": "curvature_core_kappa_b_reweight",
+      "repeats": 30,
+      "warmup": 5,
+      "time_mean_ms": 1.9232894720820088,
+      "time_std_ms": 0.676764028188701,
+      "time_median_ms": 2.2773365199100226,
+      "time_p95_ms": 3.1522472534561516,
+      "rss_peak_mean_mb": 373.728125,
+      "rss_peak_max_mb": 373.7578125,
+      "rss_delta_mean_mb": 0.036458333333333336,
+      "rss_delta_max_mb": 0.87109375
+    },
+    "spectral_scaled_kirchhoff": {
+      "name": "spectral_scaled_kirchhoff",
+      "repeats": 30,
+      "warmup": 5,
+      "time_mean_ms": 5.3087824722751975,
+      "time_std_ms": 0.8123519616018956,
+      "time_median_ms": 4.943239502608776,
+      "time_p95_ms": 7.127726965700275,
+      "rss_peak_mean_mb": 375.625,
+      "rss_peak_max_mb": 375.625,
+      "rss_delta_mean_mb": 0.0,
+      "rss_delta_max_mb": 0.0
+    },
+    "local_conductance_fiedler_sweep": {
+      "name": "local_conductance_fiedler_sweep",
+      "repeats": 30,
+      "warmup": 5,
+      "time_mean_ms": 53.47763403163602,
+      "time_std_ms": 7.201733980218542,
+      "time_median_ms": 51.615288510220125,
+      "time_p95_ms": 59.57314734405372,
+      "rss_peak_mean_mb": 376.30286458333336,
+      "rss_peak_max_mb": 376.30859375,
+      "rss_delta_mean_mb": 0.000390625,
+      "rss_delta_max_mb": 0.0078125
+    }
+  }
+}

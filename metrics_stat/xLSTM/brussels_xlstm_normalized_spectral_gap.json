@@ -1,0 +1,116 @@
+{
+  "checkpoint_base": "logs/xLSTM/student_brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False/checkpoints/epoch=17-val_loss=64.74.ckpt",
+  "n_total": 195,
+  "n_giant_component": 190,
+  "formula_caveat": "The deployed CurvatureAwareGraphPrecision_LearnP.forward() (mode='curvature', row 7) reweights via dynamic_graph._reweight_laplacian, which internally calls the lightweight dynamic_graph._balanced_forman curvature proxy, NOT the Algorithm-1 Balanced Forman formula implemented in curvature_graph_diagnostics.balanced_forman_curvature (used here for kappa_ij in the Fiedler-sensitivity correlation, and used to build the ablation-ladder mass-matching in build_ablation_multipliers.py). Rows 3-6 sidestep this because their fixed_multiplier is read directly from the checkpoint (formula-agnostic); the row7 reference number uses the true deployed formula and is reported separately for that reason.",
+  "before": {
+    "lambda2_normalised": 0.1164867319144614,
+    "lambda2_unnormalised": 1.0883063904186636
+  },
+  "curvature_vs_fiedler_sensitivity_shared_graph": {
+    "spearman_rho": -0.03291700742892455,
+    "n_edges": 6632,
+    "note": "static_adj is bit-identical across all four ablation checkpoints (verified per-row below), so kappa_ij and the Fiedler vector of the pre-rewiring graph are the same physical quantity in every row; the per-row numbers are a reproducibility check, not four different answers."
+  },
+  "ablation_ladder_rows": [
+    {
+      "row": "row3_none",
+      "checkpoint": "logs/xLSTM/student_brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False_fixed_brussels_xlstm_row3_none/checkpoints/epoch=20-val_loss=64.29.ckpt",
+      "static_adj_identical_to_base": true,
+      "same_giant_component": true,
+      "multiplier_stats": {
+        "min": 0.0,
+        "max": 0.0,
+        "mean_nonzero": 0.0,
+        "total_added_mass": 0.0
+      },
+      "spectral": {
+        "lambda2_normalised_before": 0.1164867319144614,
+        "lambda2_normalised_after": 0.1164867319144614,
+        "lambda2_normalised_pct_change": 0.0
+      },
+      "curvature_vs_fiedler_sensitivity": {
+        "spearman_rho": -0.03291700742892455,
+        "n_edges": 6632
+      }
+    },
+    {
+      "row": "row4_uniform",
+      "checkpoint": "logs/xLSTM/student_brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False_fixed_brussels_xlstm_row4_uniform/checkpoints/epoch=37-val_loss=63.98.ckpt",
+      "static_adj_identical_to_base": true,
+      "same_giant_component": true,
+      "multiplier_stats": {
+        "min": 1.5116539001464844,
+        "max": 1.5116539001464844,
+        "mean_nonzero": 1.5116539001464844,
+        "total_added_mass": 9604.598569735748
+      },
+      "spectral": {
+        "lambda2_normalised_before": 0.1164867319144614,
+        "lambda2_normalised_after": 0.11648673191446114,
+        "lambda2_normalised_pct_change": -2.263587998520714e-13
+      },
+      "curvature_vs_fiedler_sensitivity": {
+        "spearman_rho": -0.03291700742892455,
+        "n_edges": 6632
+      }
+    },
+    {
+      "row": "row5_permuted",
+      "checkpoint": "logs/xLSTM/student_brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False_fixed_brussels_xlstm_row5_permuted/checkpoints/epoch=39-val_loss=64.20.ckpt",
+      "static_adj_identical_to_base": true,
+      "same_giant_component": true,
+      "multiplier_stats": {
+        "min": 2.0944461506364497e-21,
+        "max": 91.6206283569336,
+        "mean_nonzero": 2.4426566672974683,
+        "total_added_mass": 9604.59839074747
+      },
+      "spectral": {
+        "lambda2_normalised_before": 0.1164867319144614,
+        "lambda2_normalised_after": 0.18944827276382514,
+        "lambda2_normalised_pct_change": 62.63506551367661
+      },
+      "curvature_vs_fiedler_sensitivity": {
+        "spearman_rho": -0.03291700742892455,
+        "n_edges": 6632
+      }
+    },
+    {
+      "row": "row6_inverse",
+      "checkpoint": "logs/xLSTM/student_brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False_fixed_brussels_xlstm_row6_inverse/checkpoints/epoch=20-val_loss=64.64.ckpt",
+      "static_adj_identical_to_base": true,
+      "same_giant_component": true,
+      "multiplier_stats": {
+        "min": 1.7473249727117945e-06,
+        "max": 32.45100784301758,
+        "mean_nonzero": 1.0861288289687352,
+        "total_added_mass": 9604.598392243479
+      },
+      "spectral": {
+        "lambda2_normalised_before": 0.1164867319144614,
+        "lambda2_normalised_after": 0.013199247484719574,
+        "lambda2_normalised_pct_change": -88.66888334165643
+      },
+      "curvature_vs_fiedler_sensitivity": {
+        "spearman_rho": -0.03291700742892455,
+        "n_edges": 6632
+      }
+    }
+  ],
+  "teger_row7_reference": {
+    "row": "row7_teger_reference_actual_deployed_formula",
+    "checkpoint": "logs/xLSTM/student_brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False/checkpoints/epoch=17-val_loss=64.74.ckpt",
+    "note": "NOT one of the four requested ablation graphs; reference context using dynamic_graph._reweight_laplacian (the true forward() formula) so this number matches what the checkpoint actually computes at inference.",
+    "learned_params": {
+      "lambda": 0.8778427839279175,
+      "kappa_0": -0.1184227466583252,
+      "tau": 5.446372906320569
+    },
+    "spectral": {
+      "lambda2_normalised_before": 0.1164867319144614,
+      "lambda2_normalised_after": 0.11718244686051975,
+      "lambda2_normalised_pct_change": 0.5972482313000425
+    }
+  }
+}

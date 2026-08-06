@@ -270,23 +270,46 @@ class CurvatureAwareGraphPrecision_LearnP(nn.Module):
         tau:        float = 5.0,
         sigma_min:  float = 1e-4,
         init_with_eigenvectors: bool = True,   # warm-start from spectral P
+        fixed_multiplier: torch.Tensor = None,
+        # --- ablation-ladder controls (rebuttal Priority 1) ---
+        # 'curvature' (default, row 7 / Teger): b_ij learned end-to-end.
+        # 'fixed'    : b_ij supplied externally via `fixed_multiplier` and
+        #              frozen for the whole run (rows 3/4/5/6 — no-reweight,
+        #              uniform, permuted-null, inverse-curvature; all
+        #              mass-matched to a reference Teger run offline).
+        reweight_mode: str = "curvature",
     ):
         super().__init__()
         self.rank      = rank
         self.num_nodes = num_nodes
         self.sigma_min = sigma_min
+        self.reweight_mode = reweight_mode
 
         # Register static adjacency as a buffer (not trained, moves with device)
         self.register_buffer("static_adj", static_adj.float())
         self.register_buffer("static_adj_sym", 0.5 * (static_adj + static_adj.T))
         self.register_buffer("log_gamma", torch.tensor(math.log(max(1e-8, 1.0))))  # Default log_gamma = 0
         self.register_buffer("log_lam", torch.tensor(math.log(max(1e-8, 1.0))))    # Default log_lam = 0
-        # ── Learnable curvature parameters ──────────────────────────────────
+
+        if reweight_mode == "fixed":
+            # Frozen, externally-supplied edge multiplier b_ij (rows 3-6 of the
+            # ablation ladder). W'_ij = W_ij * (1 + fixed_multiplier_ij).
+            if fixed_multiplier is None:
+                raise ValueError("reweight_mode='fixed' requires `fixed_multiplier`.")
+            self.register_buffer("fixed_multiplier", fixed_multiplier.float())
+            # lam/kappa_0/tau are inert placeholders in this mode (kept so
+            # checkpoints/state_dicts stay shape-compatible with row 7).
+            self.register_buffer("lam", torch.tensor(0.0))
+            self.register_buffer("kappa_0", torch.tensor(0.0))
+            self.register_buffer("log_tau", torch.tensor(0.0))
+        else:
+            # ── Learnable curvature parameters (row 7 / Teger, default) ──────
+            self.lam       = nn.Parameter(torch.tensor(lam))
+            self.kappa_0   = nn.Parameter(torch.tensor(kappa_0))
+            self.log_tau   = nn.Parameter(torch.tensor(tau).log())
+
         self.log_alpha = nn.Parameter(torch.tensor(alpha).log())
         self.log_beta  = nn.Parameter(torch.tensor(beta).log())
-        self.lam       = nn.Parameter(torch.tensor(lam))
-        self.kappa_0   = nn.Parameter(torch.tensor(kappa_0))
-        self.log_tau   = nn.Parameter(torch.tensor(tau).log())
 
         # ── THE FIX: learnable P ─────────────────────────────────────────────
         if init_with_eigenvectors:
@@ -318,12 +341,21 @@ class CurvatureAwareGraphPrecision_LearnP(nn.Module):
         """Returns G_t = Q_t^{-1}  of shape  (R, R)."""
         alpha = self.log_alpha.exp()
         beta  = self.log_beta.exp()
-        tau   = self.log_tau.exp()
 
-        # Reweighted Laplacian  L'_t  (N, N)
-        L_prime = _reweight_laplacian(
-            self.static_adj, self.lam, self.kappa_0, tau
-        )
+        if self.reweight_mode == "fixed":
+            # Rows 3-6: W' is frozen and supplied externally; only alpha,
+            # beta and P (below) remain learnable, isolating the effect of
+            # *where* the edge mass sits from everything else in row 7.
+            W = 0.5 * (self.static_adj + self.static_adj.t())
+            W_prime = W * (1.0 + self.fixed_multiplier)
+            deg = W_prime.sum(dim=-1)
+            L_prime = torch.diag(deg) - W_prime
+        else:
+            tau = self.log_tau.exp()
+            # Reweighted Laplacian  L'_t  (N, N)
+            L_prime = _reweight_laplacian(
+                self.static_adj, self.lam, self.kappa_0, tau
+            )
 
         # ── Project with LEARNED P  →  genuinely non-diagonal ───────────────
         # Normalise P columns so scale doesn't explode  (optional but stable)

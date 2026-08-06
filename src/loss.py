@@ -859,6 +859,12 @@ class BatchMGDCurvature_Kernel(BatchMGD_Kernel):
         curvature_sigma_min: float = 1e-4,
         static_graph: torch.Tensor = None,
         num_nodes: int = None,
+        # --- ablation-ladder controls (rebuttal Priority 1) ---
+        reweight_mode: str = "curvature",   # 'curvature' (row7) | 'fixed' (rows 3-6)
+        fixed_multiplier: torch.Tensor = None,
+        # --- row 8: node-wise volatility scaling (full Teger) ---
+        use_volatility: bool = False,
+        volatility_ema_rate: float = 0.9,
     ):
         # Forward ALL parent parameters so BatchMGD_Kernel sets up properly
         super().__init__(
@@ -908,8 +914,24 @@ class BatchMGDCurvature_Kernel(BatchMGD_Kernel):
             tau=curvature_tau,
             sigma_min=curvature_sigma_min,
             init_with_eigenvectors=True,   # warm-start, set False for random init
+            reweight_mode=reweight_mode,
+            fixed_multiplier=fixed_multiplier,
         )
         self.lambda_p = 0.1
+
+        # --- row 8: node-wise volatility scaling (full Teger) ---
+        # EMA of squared normalised residual per node, used to scale cov_diag
+        # so nodes with recently larger errors get a wider marginal band.
+        self.use_volatility = use_volatility
+        self.volatility_ema_rate = volatility_ema_rate
+        if use_volatility:
+            # NOTE: the batch axis fed to this loss is the DataLoader's
+            # per-step item axis (size = --batch_size), not the true sensor
+            # index — pytorch-forecasting's "synchronized" batch sampler does
+            # not expose a stable node id here. We therefore track volatility
+            # per batch *slot* rather than per true sensor; lazily (re)sized
+            # to whatever slot count is seen at runtime.
+            self.node_vol = None
         #         # ── Fix B: spectral + learned rotation ──────────────────────────────
         # from dynamic_graph import CurvatureAwareGraphPrecision_LearnedRotation
         # self.curvature_precision = CurvatureAwareGraphPrecision_LearnedRotation(
@@ -940,6 +962,16 @@ class BatchMGDCurvature_Kernel(BatchMGD_Kernel):
         loc = x[..., 2].flatten().unsqueeze(0)
         cov_factor = torch.block_diag(*x[..., 4:]).unsqueeze(0)
         cov_diag = x[..., 3].flatten().unsqueeze(0)
+
+        if self.use_volatility:
+            # x is (D, B, params); scale each batch-slot's diagonal variance
+            # by its recent squared-residual EMA, tiled across the D-step
+            # block the same way cov_diag is flattened (see NOTE in __init__).
+            D, B = x.shape[0], x.shape[1]
+            if self.node_vol is None or self.node_vol.shape[0] != B:
+                self.node_vol = torch.ones(B, device=cov_diag.device)
+            vol_scale = self.node_vol.to(cov_diag.device).unsqueeze(0).expand(D, B).flatten().unsqueeze(0)
+            cov_diag = cov_diag * vol_scale
 
         # ----- Compute curvature-aware factor covariance G_t -----
         # No mixture_weights needed — the module is self-contained.
@@ -984,6 +1016,8 @@ class BatchMGDCurvature_Kernel(BatchMGD_Kernel):
                         y_actual[:, i]
                     ).unsqueeze(-1)
                 )
+                if self.use_volatility:
+                    self._update_node_volatility(y_pred[:, i], y_actual[:, i])
             loss = torch.cat(loss, dim=-1)
         else:
             y_pred = y_pred.reshape(y_pred.shape[0], N, self.batch_cov_horizon, -1)
@@ -994,17 +1028,38 @@ class BatchMGDCurvature_Kernel(BatchMGD_Kernel):
                         y_actual[:, i].T.flatten().unsqueeze(0)
                     )
                 )
+                if self.use_volatility:
+                    self._update_node_volatility(y_pred[:, i], y_actual[:, i])
             loss = torch.cat(loss, dim=0).sum() * y_actual.size(0)
 
         return loss.sum()
-    
+
+    @torch.no_grad()
+    def _update_node_volatility(self, y_pred_block: torch.Tensor, y_actual_block: torch.Tensor) -> None:
+        """
+        EMA-update the per-node volatility scale used by row 8 (full Teger).
+
+        y_pred_block:  (num_nodes, D, n_params) network output for one block.
+        y_actual_block: (num_nodes, D) actuals in original scale.
+        """
+        x = y_pred_block[..., :len(self.distribution_arguments) + 2].permute(1, 0, 2)  # (D, N, params)
+        scale_loc = x[..., 0]
+        scale_std = x[..., 1].clamp(min=1e-8)
+        loc_normed = x[..., 2]
+        actual_normed = (y_actual_block.T - scale_loc) / scale_std
+        sq_resid = ((actual_normed - loc_normed) ** 2).mean(dim=0)  # (B,)
+        if self.node_vol is None or self.node_vol.shape[0] != sq_resid.shape[0]:
+            self.node_vol = torch.ones_like(sq_resid)
+        rate = self.volatility_ema_rate
+        self.node_vol = rate * self.node_vol + (1 - rate) * sq_resid.clamp(min=1e-4)
+
     def get_covariance_matrices(self) -> Dict[str, torch.Tensor]:
         cov_matrices = super().get_covariance_matrices()
         # Override G_t with curvature-aware precision matrix
         if hasattr(self, 'curvature_precision'):
             G_t = self.curvature_precision()  # This is actually the precision matrix Q_t
             cov_matrices['G_t'] = torch.linalg.inv(G_t).detach()  # Return the covariance (inverse of precision)
-        
+
         return cov_matrices
 
 

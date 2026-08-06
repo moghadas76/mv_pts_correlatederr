@@ -1,0 +1,72 @@
+{
+  "checkpoint": "logs/xLSTM/brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False/checkpoints/epoch=17-val_loss=64.74.ckpt",
+  "n_total": 195,
+  "n_component": 190,
+  "n_components": 6,
+  "n_edges": 6632,
+  "parameters": {
+    "lambda": 0.8778427839279175,
+    "kappa_0": -0.1184227466583252,
+    "tau": 5.446372985839844,
+    "alpha": 0.010651950724422932,
+    "beta": 0.8993894457817078
+  },
+  "curvature": {
+    "min": -0.2024935456195066,
+    "max": 0.4150946240891369,
+    "mean": -0.07550030296266336,
+    "std": 0.05646615015986533,
+    "frac_negative": 0.9544632086851629
+  },
+  "bottleneck": {
+    "mean": 1.5065559924244272,
+    "max": 11.604011532427958,
+    "p90": 4.529214252984705,
+    "mean_reweight_ratio": 2.3225193065331453,
+    "max_reweight_ratio": 11.186497788358219
+  },
+  "spectral": {
+    "lambda_2_original": 1.088306390418716,
+    "lambda_2_reweighted": 1.4607389229336307,
+    "lambda_2_pct_change": 34.22129427831666,
+    "scaled_kirchhoff_original": 0.049700577633910496,
+    "scaled_kirchhoff_reweighted": 0.034483797009524815,
+    "scaled_kirchhoff_pct_change": -30.616908995446636
+  },
+  "conductance": {
+    "curvature_loaded_fiedler_top_k": {
+      "n_cuts": 5,
+      "cut_sizes": [
+        105,
+        104,
+        103,
+        102,
+        101
+      ],
+      "phi_original": 0.20155664014311495,
+      "phi_reweighted": 0.3476989826535654,
+      "phi_boundary_only": 0.5300553643284523,
+      "pct_reweighted": 72.52890442162314,
+      "pct_boundary_only": 162.98277559442863,
+      "mean_boundary_b": 2.404463854963938,
+      "top_k": 5
+    },
+    "min_conductance_fiedler_top_k": {
+      "n_cuts": 5,
+      "cut_sizes": [
+        181,
+        95,
+        94,
+        96,
+        93
+      ],
+      "phi_original": 0.18704224560170277,
+      "phi_reweighted": 0.3253484849661577,
+      "phi_boundary_only": 0.4382937589967348,
+      "pct_reweighted": 73.33750720824484,
+      "pct_boundary_only": 132.68944649866336,
+      "mean_boundary_b": 1.8327026887642894,
+      "top_k": 5
+    }
+  }
+}

@@ -10,6 +10,10 @@ import torch.nn.functional as F
 import yaml
 
 import numpy as np
+if not hasattr(np, "float"):
+    # pytorch_forecasting's GroupNormalizer still references the deprecated
+    # np.float alias (removed in numpy>=1.20); restore it in-process only.
+    np.float = float
 import pandas as pd
 import torch
 import matplotlib
@@ -495,6 +499,21 @@ parser.add_argument('--loss_wd', type=float, default=1e-04)
 parser.add_argument('--hidden_proj_dim', type=int, default=0,
                     help='Revision 1 state-aware diffusion: dim of projected hidden '
                          'features (0 = disabled). Only used with --loss kernel.')
+
+# --- rebuttal ablation-ladder controls (Priority 1), --loss curvature only ---
+parser.add_argument('--rank', type=int, default=10,
+                    help='Latent rank R for the curvature-precision projection P. '
+                         'Set to num_nodes for the un-projected variant (row 9).')
+parser.add_argument('--reweight_mode', type=str, default='curvature',
+                    choices=['curvature', 'fixed'],
+                    help="'curvature' = learnable Teger reweighting (row 7). "
+                         "'fixed' = frozen externally-supplied edge multiplier "
+                         "(rows 3-6), loaded from --fixed_multiplier_path.")
+parser.add_argument('--fixed_multiplier_path', type=str, default=None,
+                    help='Path to a saved (N,N) torch tensor of edge multipliers '
+                         'b_ij used when --reweight_mode fixed.')
+parser.add_argument('--use_volatility', action='store_true',
+                    help='Row 8 (full Teger): node-wise EMA volatility scaling of cov_diag.')
 args = parser.parse_args()
 pl.seed_everything(args.seed)
 
@@ -637,7 +656,21 @@ def main():
         log_file = "%s_batch_%s_B%s_Q%s_H%s_D%s_Class_%s_Kr%s_DeltaL%s_LossLRw%s_RegW%s_TrainL_%s"%(args.dataset, args.loss, args.batch_size, args.prediction_horizon, args.hidden_size, args.batch_cov_horizon, loss.__class__.__name__+f"_use_garch_{args.use_garch}", args.num_mixture_r, args.delta_l, args.loss_lr_w, args.reg_w, args.train_l)
         logger = TensorBoardLogger(save_dir="logs", name=args.model, version=log_file)
     elif args.loss == 'curvature':
-        log_file = "student_%s_batch_%s_B%s_Q%s_H%s_D%s_Kr%s_DeltaL%s_LossLRw%s_RegW%s_TrainL_%s"%(args.dataset, args.loss, args.batch_size, args.prediction_horizon, args.hidden_size, args.batch_cov_horizon, args.num_mixture_r, args.delta_l, args.loss_lr_w, args.reg_w, args.train_l)
+        fixed_multiplier = None
+        if args.reweight_mode == 'fixed':
+            if not args.fixed_multiplier_path:
+                raise ValueError("--reweight_mode fixed requires --fixed_multiplier_path")
+            fixed_multiplier = torch.load(args.fixed_multiplier_path, map_location="cpu")
+        tag = "" if args.reweight_mode == 'curvature' and not args.use_volatility and args.rank == 10 else \
+            "_%s%s%s" % (
+                args.reweight_mode if args.reweight_mode != 'curvature' else '',
+                "_vol" if args.use_volatility else "",
+                "_R%d" % args.rank if args.rank != 10 else "",
+            )
+        fm_tag = ""
+        if fixed_multiplier is not None:
+            fm_tag = "_%s" % os.path.splitext(os.path.basename(args.fixed_multiplier_path))[0]
+        log_file = "student_%s_batch_%s_B%s_Q%s_H%s_D%s_Kr%s_DeltaL%s_LossLRw%s_RegW%s_TrainL_%s%s%s"%(args.dataset, args.loss, args.batch_size, args.prediction_horizon, args.hidden_size, args.batch_cov_horizon, args.num_mixture_r, args.delta_l, args.loss_lr_w, args.reg_w, args.train_l, tag, fm_tag)
         logger = TensorBoardLogger(save_dir="logs", name=args.model, version=log_file)
         loss = BatchMGDCurvature_Kernel(
             D=args.batch_cov_horizon,
@@ -649,6 +682,10 @@ def main():
             reg_w=args.reg_w,
             static=False,
             static_graph=static_graph,
+            rank=args.rank,
+            reweight_mode=args.reweight_mode,
+            fixed_multiplier=fixed_multiplier,
+            use_volatility=args.use_volatility,
         )
     elif args.loss == 'learnable':
         log_file = "%s_batch_%s_B%s_Q%s_H%s_D%s_Kr%s_DeltaL%s_LossLRw%s_RegW%s_TrainL_%s"%(args.dataset, args.loss, args.batch_size, args.prediction_horizon, args.hidden_size, args.batch_cov_horizon, args.num_mixture_r, args.delta_l, args.loss_lr_w, args.reg_w, args.train_l)

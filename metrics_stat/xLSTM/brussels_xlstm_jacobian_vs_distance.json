@@ -1,0 +1,453 @@
+{
+  "checkpoint": "logs/xLSTM/brussels_batch_curvature_B20_Q12_H10_D12_Kr4_DeltaL1.0_LossLRw1.0_RegW2.5_TrainL_False/checkpoints/epoch=17-val_loss=64.74.ckpt",
+  "n_total": 195,
+  "n_giant_component": 190,
+  "n_pairs_unreachable_excluded": 0,
+  "k_max": 6,
+  "learned_params": {
+    "lambda": 0.8778427839279175,
+    "kappa_0": -0.1184227466583252,
+    "tau": 5.446372906320569
+  },
+  "definition": "M^(k)_ij = (A_hat)^k_ij with A_hat = D^{-1/2} W D^{-1/2}; A_hat_before from the static (unreweighted) graph, A_hat_after from Teger's actual deployed reweighted graph (dynamic_graph._reweight_laplacian, matching CurvatureAwareGraphPrecision_LearnP.forward() exactly). This is the standard GCN-propagation surrogate for message-passing Jacobian sensitivity used in the over-squashing literature; Teger itself does not run k-layer propagation, so this is a partial answer to R2 point 2, not a claim that Teger performs multi-layer message passing.",
+  "results_by_k": [
+    {
+      "k": 1,
+      "bins_before": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.01409122030335678,
+          "std_abs_J": 0.013310674572454885
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        }
+      ],
+      "bins_after": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.014091149096460543,
+          "std_abs_J": 0.013281101128381047
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        }
+      ],
+      "decay_slope_before": NaN,
+      "decay_slope_after": NaN,
+      "decay_slope_closer_to_zero_after": null,
+      "far_hop_mass_fraction_before": 0.0,
+      "far_hop_mass_fraction_after": 0.0,
+      "far_hop_mass_ratio_after_over_before": NaN
+    },
+    {
+      "k": 2,
+      "bins_before": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.011933542469196924,
+          "std_abs_J": 0.008600676242190878
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.001435390755578681,
+          "std_abs_J": 0.0014758896316582673
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        }
+      ],
+      "bins_after": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.011926055641927003,
+          "std_abs_J": 0.008572919795575677
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0014423197542767644,
+          "std_abs_J": 0.0014802374069320858
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        }
+      ],
+      "decay_slope_before": NaN,
+      "decay_slope_after": NaN,
+      "decay_slope_closer_to_zero_after": null,
+      "far_hop_mass_fraction_before": 0.12098636016628665,
+      "far_hop_mass_fraction_after": 0.12156643417376052,
+      "far_hop_mass_ratio_after_over_before": 1.0047945405306564
+    },
+    {
+      "k": 3,
+      "bins_before": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.010824170758767578,
+          "std_abs_J": 0.007043029206920743
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0023261674956672417,
+          "std_abs_J": 0.0016782687489033626
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0001739845677018427,
+          "std_abs_J": 0.00017412665789029943
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        }
+      ],
+      "bins_after": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.010813937026780572,
+          "std_abs_J": 0.007011327409851087
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.002334595868161632,
+          "std_abs_J": 0.0016798904627354097
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0001755416031923441,
+          "std_abs_J": 0.00017536737958092897
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        }
+      ],
+      "decay_slope_before": -2.0652851708765207,
+      "decay_slope_after": -2.0603574882901348,
+      "decay_slope_closer_to_zero_after": true,
+      "far_hop_mass_fraction_before": 0.20237062317700738,
+      "far_hop_mass_fraction_after": 0.20313451254252418,
+      "far_hop_mass_ratio_after_over_before": 1.003774704813992
+    },
+    {
+      "k": 4,
+      "bins_before": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.009957737638324715,
+          "std_abs_J": 0.005820056007415871
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0029228079125726792,
+          "std_abs_J": 0.0016668125994409326
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0004572135949767139,
+          "std_abs_J": 0.0003449437863531533
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 1.6501639901856147e-05,
+          "std_abs_J": 2.3151038058010078e-05
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        }
+      ],
+      "bins_after": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.009946288103288934,
+          "std_abs_J": 0.005786287248348638
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0029314255794320103,
+          "std_abs_J": 0.001666500262908694
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.00046067578386641916,
+          "std_abs_J": 0.00034665289855367784
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 1.673671713356097e-05,
+          "std_abs_J": 2.341636110538768e-05
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 0.0,
+          "std_abs_J": 0.0
+        }
+      ],
+      "decay_slope_before": -2.1063085628544496,
+      "decay_slope_after": -2.1012598929431254,
+      "decay_slope_closer_to_zero_after": true,
+      "far_hop_mass_fraction_before": 0.26377648918925745,
+      "far_hop_mass_fraction_after": 0.264628971494936,
+      "far_hop_mass_ratio_after_over_before": 1.003231835817888
+    },
+    {
+      "k": 5,
+      "bins_before": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.009292423046756888,
+          "std_abs_J": 0.00488143415571372
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0033358270860213467,
+          "std_abs_J": 0.001586024716803254
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0007673110363920302,
+          "std_abs_J": 0.00047901904838957605
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 6.644592952043136e-05,
+          "std_abs_J": 6.429392760272643e-05
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 9.584711926488407e-06,
+          "std_abs_J": 7.451699543550035e-08
+        }
+      ],
+      "bins_after": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.009280546984631072,
+          "std_abs_J": 0.0048467769738305645
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0033440869296868583,
+          "std_abs_J": 0.0015843340991314517
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.000772374807605223,
+          "std_abs_J": 0.00048068189766729613
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 6.7295815665636e-05,
+          "std_abs_J": 6.491824958622021e-05
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 9.731468203709734e-06,
+          "std_abs_J": 7.540384342069227e-08
+        }
+      ],
+      "decay_slope_before": -1.7669658001377848,
+      "decay_slope_after": -1.7626472883257778,
+      "decay_slope_closer_to_zero_after": true,
+      "far_hop_mass_fraction_before": 0.31101127609568896,
+      "far_hop_mass_fraction_after": 0.3118968408467767,
+      "far_hop_mass_ratio_after_over_before": 1.002847371845178
+    },
+    {
+      "k": 6,
+      "bins_before": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.008768058103106005,
+          "std_abs_J": 0.004133417851664405
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.0036322161595934,
+          "std_abs_J": 0.001491354147320956
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0010669916291175697,
+          "std_abs_J": 0.0005763107911392174
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 0.0001485911026911667,
+          "std_abs_J": 0.00011230843194949697
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 4.47020271541729e-05,
+          "std_abs_J": 3.0052755956113317e-07
+        }
+      ],
+      "bins_after": [
+        {
+          "hop": 1,
+          "n_pairs": 6632,
+          "mean_abs_J": 0.008756227690314254,
+          "std_abs_J": 0.004098889879626411
+        },
+        {
+          "hop": 2,
+          "n_pairs": 7589,
+          "mean_abs_J": 0.003639895786566628,
+          "std_abs_J": 0.0014887722977114037
+        },
+        {
+          "hop": 3,
+          "n_pairs": 3218,
+          "mean_abs_J": 0.0010732448860386761,
+          "std_abs_J": 0.0005776889789776195
+        },
+        {
+          "hop": 4,
+          "n_pairs": 510,
+          "mean_abs_J": 0.00015030388289114546,
+          "std_abs_J": 0.00011323684125364586
+        },
+        {
+          "hop": 5,
+          "n_pairs": 6,
+          "mean_abs_J": 4.5290829086996887e-05,
+          "std_abs_J": 3.0329311562090467e-07
+        }
+      ],
+      "decay_slope_before": -1.375410356716841,
+      "decay_slope_after": -1.3715882996740614,
+      "decay_slope_closer_to_zero_after": true,
+      "far_hop_mass_fraction_before": 0.3482742330946905,
+      "far_hop_mass_fraction_after": 0.3491595741051791,
+      "far_hop_mass_ratio_after_over_before": 1.0025420801378893
+    }
+  ]
+}
